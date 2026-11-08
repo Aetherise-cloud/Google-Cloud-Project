@@ -1,0 +1,153 @@
+{
+  "project": "spark-mcp-gateway-as-designed",
+  "region": "asia-southeast1",
+  "currency": "USD",
+  "applyFreeTier": true,
+  "rateOverrides": {
+    "cloudRun": {
+      "requestVcpuSecondUsd": 0.0000336,
+      "requestGibSecondUsd": 0.0000035,
+      "requestPerMillionUsd": 0.40
+    }
+  },
+  "tiers": {
+    "mvp": {
+      "label": "MVP / Low (1 admin, 3k MCP req/mo, 500 GDK searches)",
+      "traffic": { "monthlyRequests": 3000 },
+      "compute": {
+        "cloudRun": [
+          {
+            "name": "spark-mcp-gateway",
+            "cpu": 1,
+            "memoryGiB": 0.5,
+            "concurrency": 80,
+            "avgExecutionMs": 400,
+            "monthlyRequests": 3000,
+            "minInstances": 0,
+            "cpuAlwaysAllocated": false
+          }
+        ]
+      },
+      "databases": {
+        "firestore": {
+          "storageGiB": 0.05,
+          "readsPerMonth": 9000,
+          "writesPerMonth": 600,
+          "deletesPerMonth": 0
+        }
+      },
+      "messagingAndOps": {
+        "secretManager": {
+          "activeSecretVersions": 6,
+          "accessOperations": 300
+        },
+        "artifactRegistry": {
+          "storageGiB": 0.25
+        },
+        "cloudLogging": {
+          "monthlyIngestedGiB": 0.006
+        }
+      },
+      "customLineItems": [
+        {
+          "name": "Google Custom Search JSON API (500 queries/mo within 100/day free cap - SUNSET JAN 1 2027)",
+          "category": "ops",
+          "monthlyUnits": 0,
+          "unitPriceUsd": 5.0
+        }
+      ]
+    },
+    "baseline": {
+      "label": "Expected Baseline (10 users, 60k MCP req/mo, 5k GDK searches)",
+      "traffic": { "monthlyRequests": 60000 },
+      "compute": {
+        "cloudRun": [
+          {
+            "name": "spark-mcp-gateway",
+            "cpu": 1,
+            "memoryGiB": 0.5,
+            "concurrency": 80,
+            "avgExecutionMs": 400,
+            "monthlyRequests": 60000,
+            "minInstances": 0,
+            "cpuAlwaysAllocated": false
+          }
+        ]
+      },
+      "databases": {
+        "firestore": {
+          "storageGiB": 0.20,
+          "readsPerMonth": 180000,
+          "writesPerMonth": 12000,
+          "deletesPerMonth": 0
+        }
+      },
+      "messagingAndOps": {
+        "secretManager": {
+          "activeSecretVersions": 6,
+          "accessOperations": 1200
+        },
+        "artifactRegistry": {
+          "storageGiB": 0.25
+        },
+        "cloudLogging": {
+          "monthlyIngestedGiB": 0.12
+        }
+      },
+      "customLineItems": [
+        {
+          "name": "Google Custom Search JSON API (5,000 queries/mo -> 2,000 billable @ $5/1k - SUNSET JAN 1 2027)",
+          "category": "ops",
+          "monthlyUnits": 2,
+          "unitPriceUsd": 5.0
+        }
+      ]
+    },
+    "scale": {
+      "label": "Peak / Scale (100 users, 1M MCP req/mo, 50k GDK searches)",
+      "traffic": { "monthlyRequests": 1000000 },
+      "compute": {
+        "cloudRun": [
+          {
+            "name": "spark-mcp-gateway",
+            "cpu": 1,
+            "memoryGiB": 0.5,
+            "concurrency": 80,
+            "avgExecutionMs": 400,
+            "monthlyRequests": 1000000,
+            "minInstances": 0,
+            "cpuAlwaysAllocated": false
+          }
+        ]
+      },
+      "databases": {
+        "firestore": {
+          "storageGiB": 1.0,
+          "readsPerMonth": 3000000,
+          "writesPerMonth": 200000,
+          "deletesPerMonth": 0
+        }
+      },
+      "messagingAndOps": {
+        "secretManager": {
+          "activeSecretVersions": 6,
+          "accessOperations": 6000
+        },
+        "artifactRegistry": {
+          "storageGiB": 0.25
+        },
+        "cloudLogging": {
+          "monthlyIngestedGiB": 2.0
+        }
+      },
+      "customLineItems": [
+        {
+          "name": "Google Custom Search JSON API (50,000 queries/mo -> 47,000 billable @ $5/1k - SUNSET JAN 1 2027)",
+          "category": "ops",
+          "monthlyUnits": 47,
+          "unitPriceUsd": 5.0
+        }
+      ]
+    }
+  }
+}

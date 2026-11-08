@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{if .Success}}Connected {{.ProviderName}}{{else}}Connection Failed{{end}} &mdash; Spark Unified MCP Gateway</title>
+  {{template "styles" .}}
+</head>
+<body>
+  <div class="auth-container">
+    <div class="card" style="text-align: center;">
+      {{if .Success}}
+        <div style="display: flex; justify-content: center; margin-bottom: 16px;">
+          <div style="width: 48px; height: 48px; border-radius: 50%; background-color: var(--success-bg); border: 2px solid var(--success-border); display: flex; align-items: center; justify-content: center;">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+          </div>
+        </div>
+        <h1>Connection Successful</h1>
+        <p style="margin-bottom: 20px;">
+          Successfully connected to <strong>{{.ProviderName}}</strong> in <code>{{.ScopeMode}}</code> mode.
+        </p>
+        <p class="text-muted" style="margin-bottom: 24px;">
+          This window will close automatically and refresh the parent window.
+        </p>
+        <div>
+          <a href="/dashboard" class="btn btn-primary" id="return-dashboard-link">Return to Dashboard</a>
+        </div>
+
+        <script>
+          (function() {
+            if (window.opener && !window.opener.closed) {
+              window.opener.postMessage({
+                type: "spark-mcp-connected",
+                provider: {{.Provider}},
+                scopeMode: {{.ScopeMode}}
+              }, window.location.origin);
+              window.close();
+            }
+          })();
+        </script>
+      {{else}}
+        <div style="display: flex; justify-content: center; margin-bottom: 16px;">
+          <div style="width: 48px; height: 48px; border-radius: 50%; background-color: var(--danger-bg); border: 2px solid var(--danger-border); display: flex; align-items: center; justify-content: center;">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </div>
+        </div>
+        <h1>Connection Failed</h1>
+        <p style="margin-bottom: 16px;">Could not connect to <strong>{{.ProviderName}}</strong>.</p>
+        {{if .ErrorMessage}}
+        <div class="alert alert-error" role="alert" style="text-align: left;">
+          <span>{{.ErrorMessage}}</span>
+        </div>
+        {{end}}
+        <div class="btn-row" style="justify-content: center; margin-top: 20px;">
+          <button type="button" class="btn btn-secondary" onclick="window.close()">Close Window</button>
+          <a href="/dashboard" class="btn btn-outline">Return to Dashboard</a>
+        </div>
+      {{end}}
+    </div>
+  </div>
+</body>
+</html>

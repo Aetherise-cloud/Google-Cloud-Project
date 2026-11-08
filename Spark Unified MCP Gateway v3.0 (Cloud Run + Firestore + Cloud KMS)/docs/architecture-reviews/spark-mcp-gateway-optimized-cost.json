@@ -1,0 +1,58 @@
+{
+  "project": "spark-mcp-gateway-optimized",
+  "region": "asia-southeast1",
+  "currency": "USD",
+  "applyFreeTier": true,
+  "generatedAt": "2026-11-08T05:53:26.507Z",
+  "tiers": {
+    "mvp": {
+      "tierKey": "mvp",
+      "label": "MVP / Low (1 admin, 3k MCP req/mo, 500 GDK searches)",
+      "breakdown": {
+        "compute": 0,
+        "databases": 0.009,
+        "storage": 0,
+        "messagingAndOps": 0.0609,
+        "networking": 0,
+        "aiServices": 0,
+        "alwaysFreeDeductions": 0.2848099375,
+        "grandTotal": 0.0699
+      },
+      "aiPipelines": [],
+      "warnings": []
+    },
+    "baseline": {
+      "tierKey": "baseline",
+      "label": "Expected Baseline (10 users, 60k MCP req/mo, 5k GDK searches)",
+      "breakdown": {
+        "compute": 0,
+        "databases": 0.036,
+        "storage": 0,
+        "messagingAndOps": 0.078,
+        "networking": 0,
+        "aiServices": 0,
+        "alwaysFreeDeductions": 0.45653275,
+        "grandTotal": 0.11399999999999999
+      },
+      "aiPipelines": [],
+      "warnings": []
+    },
+    "scale": {
+      "tierKey": "scale",
+      "label": "Peak / Scale (100 users, 1M MCP req/mo, 50k GDK searches)",
+      "breakdown": {
+        "compute": 0,
+        "databases": 0.18,
+        "storage": 0,
+        "messagingAndOps": 0.36,
+        "networking": 0,
+        "aiServices": 0,
+        "alwaysFreeDeductions": 2.8666605,
+        "grandTotal": 0.54
+      },
+      "aiPipelines": [],
+      "warnings": []
+    }
+  },
+  "allWarnings": []
+}
