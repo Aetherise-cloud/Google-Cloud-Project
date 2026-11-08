@@ -4,9 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -46,8 +46,6 @@ func TestBrokerDashboardAndConnect(t *testing.T) {
 	b.RegisterRoutes(mux)
 
 	adminEmail := "admin@example.com"
-	cookieVal := fmt.Sprintf("%s:%d:%s", adminEmail, time.Now().Unix(), sm.GenerateCSRFToken(adminEmail)) // valid format
-	// Actually issue valid session cookie
 	recSession := httptest.NewRecorder()
 	sm.SetAdminSession(recSession, adminEmail)
 	cookie := recSession.Result().Cookies()[0]
@@ -82,7 +80,182 @@ func TestBrokerDashboardAndConnect(t *testing.T) {
 	if !strings.Contains(loc, "github.com/login/oauth/authorize") {
 		t.Errorf("unexpected redirect location: %s", loc)
 	}
-	_ = cookieVal
+}
+
+func TestBrokerOAuthConfigKMS(t *testing.T) {
+	b, _, _, sm, cfg := newTestBroker(t)
+	// Clear env config so only KMS stores it
+	cfg.GitHubOAuthClientID = ""
+	cfg.GitHubOAuthClientSecret = ""
+
+	mux := http.NewServeMux()
+	b.RegisterRoutes(mux)
+
+	adminEmail := "admin@example.com"
+	csrfToken := sm.GenerateCSRFToken(adminEmail)
+	recSession := httptest.NewRecorder()
+	sm.SetAdminSession(recSession, adminEmail)
+	cookie := recSession.Result().Cookies()[0]
+
+	// Configure GitHub OAuth Client credentials in TokenVault
+	form := url.Values{
+		"client_id":           {"kms-gh-id"},
+		"client_secret":       {"kms-gh-secret"},
+		"allowed_write_repos": {"octo/spark"},
+		"csrf_token":          {csrfToken},
+	}
+	req := httptest.NewRequest("POST", "/api/connectors/github/oauth-config", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /api/connectors/github/oauth-config, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify ResolveOAuthCredentials returns KMS credentials
+	id, sec, repos := b.ResolveOAuthCredentials(context.Background(), "github")
+	if id != "kms-gh-id" || sec != "kms-gh-secret" || repos != "octo/spark" {
+		t.Errorf("unexpected resolved credentials: id=%s, sec=%s, repos=%s", id, sec, repos)
+	}
+
+	// Verify /oauth/connect/github now succeeds with KMS client ID
+	reqConnect := httptest.NewRequest("GET", "/oauth/connect/github", nil)
+	reqConnect.AddCookie(cookie)
+	recConnect := httptest.NewRecorder()
+	mux.ServeHTTP(recConnect, reqConnect)
+
+	if recConnect.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect, got %d", recConnect.Code)
+	}
+	if !strings.Contains(recConnect.Header().Get("Location"), "client_id=kms-gh-id") {
+		t.Errorf("redirect URI missing KMS client ID: %s", recConnect.Header().Get("Location"))
+	}
+}
+
+func TestBrokerGitHubPAT(t *testing.T) {
+	b, _, v, sm, _ := newTestBroker(t)
+	adminEmail := "admin@example.com"
+
+	// Mock GitHub /user
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer ghp_valid_pat_123" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"login":"brendon-dev"}`))
+	}))
+	defer server.Close()
+	b.GitHubAPIURL = server.URL
+
+	mux := http.NewServeMux()
+	b.RegisterRoutes(mux)
+
+	csrfToken := sm.GenerateCSRFToken(adminEmail)
+	recSession := httptest.NewRecorder()
+	sm.SetAdminSession(recSession, adminEmail)
+	cookie := recSession.Result().Cookies()[0]
+
+	// POST /api/connectors/github/pat
+	patJSON := `{
+		"access_token": "ghp_valid_pat_123",
+		"scope_mode": "read_only",
+		"csrf_token": "` + csrfToken + `"
+	}`
+	req := httptest.NewRequest("POST", "/api/connectors/github/pat", strings.NewReader(patJSON))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /api/connectors/github/pat, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var res struct {
+		OK           bool   `json:"ok"`
+		AccountLabel string `json:"account_label"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &res)
+	if !res.OK || res.AccountLabel != "@brendon-dev" {
+		t.Errorf("unexpected PAT response: %+v", res)
+	}
+
+	// Verify vault has PAT token
+	tok, err := v.GetValidAccessToken(context.Background(), adminEmail, "github")
+	if err != nil {
+		t.Fatalf("failed retrieving PAT from vault: %v", err)
+	}
+	if tok.ConnectorType != "pat" || tok.AccessToken != "ghp_valid_pat_123" {
+		t.Errorf("unexpected stored PAT token: %+v", tok)
+	}
+}
+
+func TestBrokerCustomConnectorAndDisconnect(t *testing.T) {
+	b, _, v, sm, _ := newTestBroker(t)
+	b.AllowLoopbackForTest = true
+	adminEmail := "admin@example.com"
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockServer.Close()
+
+	mux := http.NewServeMux()
+	b.RegisterRoutes(mux)
+
+	csrfToken := sm.GenerateCSRFToken(adminEmail)
+	recSession := httptest.NewRecorder()
+	sm.SetAdminSession(recSession, adminEmail)
+	cookie := recSession.Result().Cookies()[0]
+
+	// 1. Add custom connector via POST /api/connectors/custom (using auth_token alias sent by dashboard UI)
+	customJSON := `{
+		"slug": "slack",
+		"name": "Team Slack",
+		"connector_type": "remote_mcp",
+		"endpoint_url": "` + mockServer.URL + `",
+		"auth_token": "xoxb-slack-token",
+		"csrf_token": "` + csrfToken + `"
+	}`
+	reqAdd := httptest.NewRequest("POST", "/api/connectors/custom", strings.NewReader(customJSON))
+	reqAdd.Header.Set("Content-Type", "application/json")
+	reqAdd.AddCookie(cookie)
+	recAdd := httptest.NewRecorder()
+	mux.ServeHTTP(recAdd, reqAdd)
+
+	if recAdd.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from adding custom connector, got %d: %s", recAdd.Code, recAdd.Body.String())
+	}
+
+	// Verify TokenVault stored custom connector with decrypted token
+	tok, err := v.GetValidAccessToken(context.Background(), adminEmail, "custom:slack")
+	if err != nil {
+		t.Fatalf("failed retrieving custom:slack from vault: %v", err)
+	}
+	if tok.ConnectorName != "Team Slack" || tok.ConnectorType != "remote_mcp" || tok.AccessToken != "xoxb-slack-token" {
+		t.Errorf("unexpected custom connector data: %+v", tok)
+	}
+
+	// 2. Disconnect custom connector via POST /api/connections/custom:slack/disconnect
+	reqDisc := httptest.NewRequest("POST", "/api/connections/custom:slack/disconnect", strings.NewReader("csrf_token="+csrfToken))
+	reqDisc.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqDisc.Header.Set("Accept", "application/json")
+	reqDisc.AddCookie(cookie)
+	recDisc := httptest.NewRecorder()
+	mux.ServeHTTP(recDisc, reqDisc)
+
+	if recDisc.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from disconnecting custom:slack, got %d: %s", recDisc.Code, recDisc.Body.String())
+	}
+
+	_, err = v.GetValidAccessToken(context.Background(), adminEmail, "custom:slack")
+	if err == nil {
+		t.Error("expected custom:slack to be removed from vault after disconnect")
+	}
 }
 
 func TestBrokerGitHubCallback(t *testing.T) {

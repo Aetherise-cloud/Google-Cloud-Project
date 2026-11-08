@@ -60,15 +60,39 @@ func TestOAuth21DCRRedirectURIRestrictions(t *testing.T) {
 		t.Fatalf("expected status 201 for cursor://, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// 2. Allowed redirect_uri: https://gemini.google.com/oauth/callback
-	bodyGoogle := `{"client_name":"Gemini Client","redirect_uris":["https://gemini.google.com/oauth/callback"]}`
+	// 2. Allowed redirect_uri: exact Google OpenAuth DCR hosts & Gemini domains
+	bodyGoogle := `{
+		"client_name":"Gemini Spark Client",
+		"token_endpoint_auth_method":"client_secret_post",
+		"redirect_uris":[
+			"https://oauth-redirect.googleusercontent.com/r/abc",
+			"https://oauth-redirect.googleusercontent.com/r/def",
+			"https://oauth-redirect.googleusercontent.com/a/ghi",
+			"https://oauth-redirect-sandbox.googleusercontent.com/r/jkl",
+			"https://gemini.google.com/oauth/callback",
+			"https://vertexaisearch.cloud.google.com/oauth-redirect"
+		]
+	}`
 	req2 := httptest.NewRequest("POST", "/api/oauth/register", strings.NewReader(bodyGoogle))
 	req2.Header.Set("Content-Type", "application/json")
 	rec2 := httptest.NewRecorder()
 	mux.ServeHTTP(rec2, req2)
 
 	if rec2.Code != http.StatusCreated {
-		t.Fatalf("expected status 201 for gemini.google.com, got %d: %s", rec2.Code, rec2.Body.String())
+		t.Fatalf("expected status 201 for Google OpenAuth DCR URIs, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+
+	var dcrRes struct {
+		ClientID                string `json:"client_id"`
+		ClientSecret            string `json:"client_secret"`
+		TokenEndpointAuthMethod string `json:"token_endpoint_auth_method"`
+		TokenEndpointAuthMode   string `json:"token_endpoint_auth_mode"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &dcrRes); err != nil {
+		t.Fatalf("failed decoding DCR response: %v", err)
+	}
+	if dcrRes.TokenEndpointAuthMethod != "client_secret_post" || dcrRes.TokenEndpointAuthMode != "client_secret_post" {
+		t.Errorf("expected token_endpoint_auth_method client_secret_post, got %q", dcrRes.TokenEndpointAuthMethod)
 	}
 
 	// 3. Disallowed: evil attacker domain https://evil.attacker.com/callback
@@ -82,7 +106,7 @@ func TestOAuth21DCRRedirectURIRestrictions(t *testing.T) {
 		t.Errorf("expected status 400 for evil domain, got %d", rec3.Code)
 	}
 
-	// 4. Disallowed: googleusercontent.com wildcard must be rejected (P1-3)
+	// 4a. Disallowed: googleusercontent.com wildcard user-content subdomains MUST be rejected (P1-1)
 	bodyGUC := `{"client_name":"GUC Client","redirect_uris":["https://evil.googleusercontent.com/cb"]}`
 	req4 := httptest.NewRequest("POST", "/api/oauth/register", strings.NewReader(bodyGUC))
 	req4.Header.Set("Content-Type", "application/json")
@@ -90,6 +114,30 @@ func TestOAuth21DCRRedirectURIRestrictions(t *testing.T) {
 	mux.ServeHTTP(rec4, req4)
 	if rec4.Code != http.StatusBadRequest {
 		t.Errorf("expected status 400 for evil.googleusercontent.com, got %d", rec4.Code)
+	}
+
+	// 4b. Disallowed: storage.googleapis.com user bucket MUST be rejected (P1-1)
+	bodyGCS := `{"client_name":"GCS Client","redirect_uris":["https://evil.storage.googleapis.com/cb"]}`
+	reqGCS := httptest.NewRequest("POST", "/api/oauth/register", strings.NewReader(bodyGCS))
+	reqGCS.Header.Set("Content-Type", "application/json")
+	recGCS := httptest.NewRecorder()
+	mux.ServeHTTP(recGCS, reqGCS)
+	if recGCS.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400 for evil.storage.googleapis.com, got %d", recGCS.Code)
+	}
+
+	// 4c. Disallowed: >25 redirect URIs
+	tooMany := make([]string, 26)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("https://gemini.google.com/cb%d", i)
+	}
+	tooManyBytes, _ := json.Marshal(map[string]interface{}{"redirect_uris": tooMany})
+	reqTooMany := httptest.NewRequest("POST", "/api/oauth/register", strings.NewReader(string(tooManyBytes)))
+	reqTooMany.Header.Set("Content-Type", "application/json")
+	recTooMany := httptest.NewRecorder()
+	mux.ServeHTTP(recTooMany, reqTooMany)
+	if recTooMany.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400 for >25 redirect_uris, got %d", recTooMany.Code)
 	}
 
 	// 5. Disallowed: @ userinfo bypass
@@ -120,6 +168,132 @@ func TestOAuth21DCRRedirectURIRestrictions(t *testing.T) {
 	mux.ServeHTTP(rec7, req7)
 	if rec7.Code != http.StatusBadRequest {
 		t.Errorf("expected status 400 for URI with path traversal, got %d", rec7.Code)
+	}
+}
+
+func TestProtectedResourceMCPDiscovery(t *testing.T) {
+	server, cfg, _ := newTestAuthServer(t)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+
+	// RFC 9728 §3.1 path-appended discovery probed by Google OpenAuth
+	req := httptest.NewRequest("GET", "/.well-known/oauth-protected-resource/mcp", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /.well-known/oauth-protected-resource/mcp, got %d", rec.Code)
+	}
+
+	var res struct {
+		Resource             string   `json:"resource"`
+		AuthorizationServers []string `json:"authorization_servers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("failed unmarshaling protected resource response: %v", err)
+	}
+	expectedRes := cfg.ServiceURL + "/mcp"
+	if res.Resource != expectedRes {
+		t.Errorf("expected resource %s, got %s", expectedRes, res.Resource)
+	}
+}
+
+func TestStaticClientAndConfidentialClientTokenExchange(t *testing.T) {
+	server, cfg, _ := newTestAuthServer(t)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+
+	adminEmail := "brendon.ang20011007@gmail.com"
+	csrfToken := server.SessionManager().GenerateCSRFToken(adminEmail)
+
+	// 1. Mint static client via POST /api/oauth/clients/static
+	staticBody := `{
+		"client_name": "Gemini Spark Static Client",
+		"csrf_token": "` + csrfToken + `"
+	}`
+	reqStatic := httptest.NewRequest("POST", "/api/oauth/clients/static", strings.NewReader(staticBody))
+	reqStatic.Header.Set("Content-Type", "application/json")
+	cookieHeader := server.SessionManager().cookieName + "=" + fmt.Sprintf("%s:%d:%s", adminEmail, time.Now().Unix(), server.SessionManager().sign(fmt.Sprintf("%s:%d", adminEmail, time.Now().Unix())))
+	reqStatic.Header.Set("Cookie", cookieHeader)
+	recStatic := httptest.NewRecorder()
+	mux.ServeHTTP(recStatic, reqStatic)
+
+	if recStatic.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created from /api/oauth/clients/static, got %d: %s", recStatic.Code, recStatic.Body.String())
+	}
+
+	var staticClient struct {
+		ClientID     string   `json:"client_id"`
+		ClientSecret string   `json:"client_secret"`
+		RedirectURIs []string `json:"redirect_uris"`
+	}
+	if err := json.Unmarshal(recStatic.Body.Bytes(), &staticClient); err != nil {
+		t.Fatalf("failed decoding static client JSON: %v", err)
+	}
+
+	if !strings.HasPrefix(staticClient.ClientID, "spark-static-client-") {
+		t.Errorf("expected static client ID prefix spark-static-client-, got %s", staticClient.ClientID)
+	}
+
+	// 2. Authorize with static client prefix matching (Google custom-mcp dynamic redirect URI)
+	dynamicURI := "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-12345"
+	authForm := url.Values{
+		"decision":     {"approve"},
+		"client_id":    {staticClient.ClientID},
+		"redirect_uri": {dynamicURI},
+		"state":        {"xyz-state"},
+		"csrf_token":   {csrfToken},
+		"preset":       {"read_only"},
+	}
+	reqAuth := httptest.NewRequest("POST", "/authorize", strings.NewReader(authForm.Encode()))
+	reqAuth.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqAuth.Header.Set("Cookie", cookieHeader)
+	recAuth := httptest.NewRecorder()
+	mux.ServeHTTP(recAuth, reqAuth)
+
+	if recAuth.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect from /authorize with static client prefix matching, got %d: %s", recAuth.Code, recAuth.Body.String())
+	}
+
+	loc, _ := url.Parse(recAuth.Header().Get("Location"))
+	code := loc.Query().Get("code")
+	if code == "" {
+		t.Fatal("expected authorization code in redirect location")
+	}
+
+	// 3. Token exchange using client_secret_basic (RFC 6749 §2.3.1 Authorization: Basic ...)
+	tokenForm := url.Values{
+		"grant_type":   {"authorization_code"},
+		"code":         {code},
+		"redirect_uri": {dynamicURI},
+	}
+	reqToken := httptest.NewRequest("POST", "/api/oauth/token", strings.NewReader(tokenForm.Encode()))
+	reqToken.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqToken.SetBasicAuth(staticClient.ClientID, staticClient.ClientSecret)
+	recToken := httptest.NewRecorder()
+	mux.ServeHTTP(recToken, reqToken)
+
+	if recToken.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from token exchange using client_secret_basic, got %d: %s", recToken.Code, recToken.Body.String())
+	}
+
+	var tokenRes struct {
+		AccessToken string `json:"access_token"`
+		TokenType   string `json:"token_type"`
+	}
+	if err := json.Unmarshal(recToken.Body.Bytes(), &tokenRes); err != nil {
+		t.Fatalf("failed decoding token response: %v", err)
+	}
+	if tokenRes.AccessToken == "" {
+		t.Error("expected non-empty access_token")
+	}
+
+	claims, err := VerifyJWT(tokenRes.AccessToken, &cfg.JWTES256PrivateKey.PublicKey, cfg.ServiceURL, cfg.ServiceURL+"/mcp")
+	if err != nil {
+		t.Fatalf("JWT verification failed on static client token: %v", err)
+	}
+	if claims.Subject != "admin:"+adminEmail {
+		t.Errorf("expected subject admin:%s, got %s", adminEmail, claims.Subject)
 	}
 }
 

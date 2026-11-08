@@ -226,6 +226,185 @@ func TestMCPToolsListDynamicFiltering(t *testing.T) {
 	}
 }
 
+func TestMCPCustomConnectorFederation(t *testing.T) {
+	server, cfg, _, v, _ := newTestMCPServer(t)
+	server.AllowLoopbackForTest = true
+	adminEmail := "admin@example.com"
+	ctx := context.Background()
+
+	// Upstream mock server serving both Remote MCP and REST API
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/mcp":
+			var req struct {
+				Method string `json:"method"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.Method == "tools/list" {
+				_, _ = w.Write([]byte(`{
+					"jsonrpc": "2.0",
+					"id": 1,
+					"result": {
+						"tools": [
+							{"name": "post_message", "description": "Post Slack message", "inputSchema": {}}
+						]
+					}
+				}`))
+			} else if req.Method == "tools/call" {
+				_, _ = w.Write([]byte(`{
+					"jsonrpc": "2.0",
+					"id": 1,
+					"result": {
+						"content": [{"type": "text", "text": "Message sent to #general"}],
+						"isError": false
+					}
+				}`))
+			}
+		case r.Method == "GET" && r.URL.Path == "/v1/items":
+			_, _ = w.Write([]byte(`[{"id":"item-1","name":"Widget"}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockUpstream.Close()
+
+	// Store custom remote_mcp connector (read_only): custom:slack
+	_ = v.StoreToken(ctx, adminEmail, "custom:slack", &vault.TokenData{
+		ConnectorName: "Slack",
+		ConnectorType: "remote_mcp",
+		EndpointURL:   mockUpstream.URL + "/mcp",
+		Scope:         "read_only",
+	})
+
+	// Store custom remote_mcp connector requiring full_access (P1-3): custom:adminmcp
+	_ = v.StoreToken(ctx, adminEmail, "custom:adminmcp", &vault.TokenData{
+		ConnectorName: "Admin MCP",
+		ConnectorType: "remote_mcp",
+		EndpointURL:   mockUpstream.URL + "/mcp",
+		Scope:         "full_access",
+	})
+
+	// Store custom rest_api connector: custom:inventory
+	_ = v.StoreToken(ctx, adminEmail, "custom:inventory", &vault.TokenData{
+		ConnectorName: "Inventory API",
+		ConnectorType: "rest_api",
+		EndpointURL:   mockUpstream.URL,
+	})
+
+	token := issueTestJWT(t, cfg, map[string]string{
+		"custom:slack":     "read_only",
+		"custom:adminmcp":  "read_only",
+		"custom:inventory": "read_only",
+	}, "")
+
+	// 1. tools/list includes federated tools, while hiding full_access connector under read_only JWT
+	listBody := `{"jsonrpc":"2.0","id":30,"method":"tools/list"}`
+	reqList := httptest.NewRequest("POST", "/mcp", strings.NewReader(listBody))
+	reqList.Header.Set("Authorization", "Bearer "+token)
+	recList := httptest.NewRecorder()
+	server.ServeHTTP(recList, reqList)
+
+	if recList.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from tools/list, got %d: %s", recList.Code, recList.Body.String())
+	}
+
+	var listRes struct {
+		Result struct {
+			Tools []struct {
+				Name string `json:"name"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	_ = json.Unmarshal(recList.Body.Bytes(), &listRes)
+
+	toolNames := make(map[string]bool)
+	for _, tool := range listRes.Result.Tools {
+		toolNames[tool.Name] = true
+	}
+
+	if !toolNames["slack__post_message"] {
+		t.Errorf("expected federated remote MCP tool slack__post_message, got: %+v", toolNames)
+	}
+	if toolNames["adminmcp__post_message"] {
+		t.Errorf("expected full_access remote MCP connector adminmcp to be hidden under read_only JWT")
+	}
+	if !toolNames["inventory_api_request"] {
+		t.Errorf("expected federated REST tool inventory_api_request, got: %+v", toolNames)
+	}
+
+	// 2. tools/call dispatches to remote MCP tool and wraps in XML Spotlight
+	callBody := `{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"slack__post_message","arguments":{}}}`
+	reqCall := httptest.NewRequest("POST", "/mcp", strings.NewReader(callBody))
+	reqCall.Header.Set("Authorization", "Bearer "+token)
+	recCall := httptest.NewRecorder()
+	server.ServeHTTP(recCall, reqCall)
+
+	if recCall.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on remote MCP tools/call, got %d: %s", recCall.Code, recCall.Body.String())
+	}
+
+	var callRes struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+			IsError bool `json:"isError"`
+		} `json:"result"`
+	}
+	_ = json.Unmarshal(recCall.Body.Bytes(), &callRes)
+
+	if callRes.Result.IsError || len(callRes.Result.Content) == 0 {
+		t.Fatalf("expected successful remote tool output: %+v", callRes)
+	}
+	text := callRes.Result.Content[0].Text
+	if !strings.Contains(text, "<untrusted_upstream_data provider=\"custom:slack\" tool=\"slack__post_message\">") {
+		t.Errorf("expected XML Spotlight wrapper with custom:slack provider, got: %s", text)
+	}
+	if !strings.Contains(text, "Message sent to #general") {
+		t.Errorf("expected remote output content in spotlight wrapper, got: %s", text)
+	}
+
+	// 2b. P1-3: Calling full_access remote_mcp connector with read_only JWT MUST be blocked
+	adminCallBody := `{"jsonrpc":"2.0","id":34,"method":"tools/call","params":{"name":"adminmcp__post_message","arguments":{}}}`
+	reqAdminCall := httptest.NewRequest("POST", "/mcp", strings.NewReader(adminCallBody))
+	reqAdminCall.Header.Set("Authorization", "Bearer "+token)
+	recAdminCall := httptest.NewRecorder()
+	server.ServeHTTP(recAdminCall, reqAdminCall)
+	_ = json.Unmarshal(recAdminCall.Body.Bytes(), &callRes)
+	if !callRes.Result.IsError {
+		t.Error("expected full_access remote MCP connector call under read_only JWT to fail with isError: true")
+	}
+
+	// 3. tools/call dispatches to custom REST API tool
+	restCallBody := `{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"inventory_api_request","arguments":{"method":"GET","path":"/v1/items"}}}`
+	reqRestCall := httptest.NewRequest("POST", "/mcp", strings.NewReader(restCallBody))
+	reqRestCall.Header.Set("Authorization", "Bearer "+token)
+	recRestCall := httptest.NewRecorder()
+	server.ServeHTTP(recRestCall, reqRestCall)
+
+	if recRestCall.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on REST tools/call, got %d: %s", recRestCall.Code, recRestCall.Body.String())
+	}
+	_ = json.Unmarshal(recRestCall.Body.Bytes(), &callRes)
+	restText := callRes.Result.Content[0].Text
+	if !strings.Contains(restText, "Widget") {
+		t.Errorf("expected Widget in REST API output, got: %s", restText)
+	}
+
+	// 4. Mutating method (POST/DELETE) blocked under read_only scope
+	mutatingBody := `{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"inventory_api_request","arguments":{"method":"DELETE","path":"/v1/items/1"}}}`
+	reqMutate := httptest.NewRequest("POST", "/mcp", strings.NewReader(mutatingBody))
+	reqMutate.Header.Set("Authorization", "Bearer "+token)
+	recMutate := httptest.NewRecorder()
+	server.ServeHTTP(recMutate, reqMutate)
+
+	_ = json.Unmarshal(recMutate.Body.Bytes(), &callRes)
+	if !callRes.Result.IsError {
+		t.Error("expected mutating method under read_only scope to fail with isError: true")
+	}
+}
+
 func TestMCPToolsCallSpotlightAndBreakoutEscaping(t *testing.T) {
 	server, cfg, _, _, reg := newTestMCPServer(t)
 
@@ -285,7 +464,6 @@ func TestMCPToolsCallSpotlightAndBreakoutEscaping(t *testing.T) {
 	}
 
 	// CRITICAL SECURITY ASSERTION (SEC-05 & P2-4): All internal breakout tags MUST be neutralized!
-	// Count occurrences of literal "</untrusted_upstream_data>"
 	count := strings.Count(text, "</untrusted_upstream_data>")
 	if count != 1 {
 		t.Fatalf("SECURITY VIOLATION: expected exactly 1 closing tag (the outer wrapper), found %d in text:\n%s", count, text)
