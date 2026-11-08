@@ -1,13 +1,13 @@
 # ==============================================================================
 # Workload Identity Federation (WIF) & GitHub Actions Deployer Scoped Permissions
 # ==============================================================================
-# In GCP project group-511516, the GitHub Workload Identity Pool ('github') and
-# gh-deployer service account are ALREADY provisioned and managed by Group Finance.
+# In standalone GCP project spark-mcp-gateway-v3 (folder Aetherise), the GitHub
+# Workload Identity Pool ('github') and gh-deployer service account are pre-bootstrapped.
 #
 # To support PR terraform plan while preventing state collisions and duplicate resource conflicts:
-# 1. Defaults create_wif_pool = false (reuses existing 'github' pool)
-# 2. Uses var.existing_gh_deployer_sa_email (gh-deployer@group-511516.iam.gserviceaccount.com)
-# 3. Provisions dedicated WIF Provider 'spark-mcp-oidc' inside 'github' pool with
+# 1. Defaults create_wif_pool = false (reuses pre-bootstrapped 'github' pool)
+# 2. Uses var.existing_gh_deployer_sa_email (gh-deployer@spark-mcp-gateway-v3.iam.gserviceaccount.com)
+# 3. Imports and manages dedicated WIF Provider 'spark-mcp-oidc' inside 'github' pool with
 #    attribute_condition allowing main, staging, and pull_request events for repository 1420258600.
 # 4. Grants resource-scoped & administrative permissions to the deployer SA:
 #    - Artifact Registry writer on spark-gateway repository
@@ -57,7 +57,7 @@ resource "google_iam_workload_identity_pool_provider" "github_oidc" {
 # Import pre-bootstrapped dedicated OIDC provider into isolated Terraform state
 import {
   to = google_iam_workload_identity_pool_provider.spark_mcp_oidc
-  id = "projects/group-511516/locations/global/workloadIdentityPools/github/providers/spark-mcp-oidc"
+  id = "projects/spark-mcp-gateway-v3/locations/global/workloadIdentityPools/github/providers/spark-mcp-oidc"
 }
 
 # Dedicated OIDC provider for Spark MCP Gateway CI/CD (supports PR plan + main/staging apply)

@@ -1,13 +1,13 @@
 variable "project_id" {
   description = "The GCP Project ID"
   type        = string
-  default     = "group-511516"
+  default     = "spark-mcp-gateway-v3"
 }
 
 variable "project_number" {
   description = "The GCP Project Number"
   type        = string
-  default     = "997395841168"
+  default     = "515472562394"
 }
 
 variable "region" {
@@ -110,13 +110,13 @@ variable "jira_oauth_client_secret" {
 }
 
 variable "existing_gh_deployer_sa_email" {
-  description = "Email of the existing GitHub Actions deployer service account in group-511516"
+  description = "Email of the existing GitHub Actions deployer service account in spark-mcp-gateway-v3"
   type        = string
-  default     = "gh-deployer@group-511516.iam.gserviceaccount.com"
+  default     = "gh-deployer@spark-mcp-gateway-v3.iam.gserviceaccount.com"
 }
 
 variable "create_wif_pool" {
-  description = "Whether to create the GitHub Workload Identity Pool (set to false when using existing 'github' pool in group-511516)"
+  description = "Whether to create the GitHub Workload Identity Pool (set to false when using pre-bootstrapped 'github' pool in spark-mcp-gateway-v3)"
   type        = bool
   default     = false
 }

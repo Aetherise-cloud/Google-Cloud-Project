@@ -31,7 +31,7 @@ on:
           - apply
           - destroy
       confirm_destroy:
-        description: 'Target GCP Project ID confirmation (REQUIRED and must equal group-511516 if action is destroy)'
+        description: 'Target GCP Project ID confirmation (REQUIRED and must equal spark-mcp-gateway-v3 if action is destroy)'
         required: false
         type: string
         default: ''
@@ -49,7 +49,7 @@ concurrency:
 env:
   TF_WORKING_DIR: 'Spark Unified MCP Gateway v3.0 (Cloud Run + Firestore + Cloud KMS)/terraform'
   TF_VERSION: "1.9.8"
-  TF_VAR_project_id: ${{ vars.SPARK_MCP_PROJECT_ID || 'group-511516' }}
+  TF_VAR_project_id: ${{ vars.SPARK_MCP_PROJECT_ID || 'spark-mcp-gateway-v3' }}
   TF_VAR_google_oidc_client_id: ${{ secrets.SPARK_GOOGLE_OIDC_CLIENT_ID || vars.SPARK_GOOGLE_OIDC_CLIENT_ID || '' }}
   TF_VAR_google_oidc_client_secret: ${{ secrets.SPARK_GOOGLE_OIDC_CLIENT_SECRET || '' }}
   TF_VAR_github_oauth_client_id: ${{ secrets.SPARK_GITHUB_OAUTH_CLIENT_ID || vars.SPARK_GITHUB_OAUTH_CLIENT_ID || '' }}
@@ -70,11 +70,11 @@ jobs:
         run: |
           echo "Checking destroy confirmation parameters..."
           CONFIRM_ID="${{ github.event.inputs.confirm_destroy }}"
-          if [ "${CONFIRM_ID}" != "group-511516" ]; then
-            echo "::error::Terraform destroy aborted! confirm_destroy '${CONFIRM_ID}' does not match required 'group-511516'."
+          if [ "${CONFIRM_ID}" != "spark-mcp-gateway-v3" ]; then
+            echo "::error::Terraform destroy aborted! confirm_destroy '${CONFIRM_ID}' does not match required 'spark-mcp-gateway-v3'."
             exit 1
           fi
-          echo "Destroy confirmation passed for project group-511516."
+          echo "Destroy confirmation passed for project spark-mcp-gateway-v3."
 
       - name: Checkout Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -103,8 +103,8 @@ jobs:
         continue-on-error: true
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER || 'projects/997395841168/locations/global/workloadIdentityPools/github/providers/spark-mcp-oidc' }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT || 'gh-deployer@group-511516.iam.gserviceaccount.com' }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER || 'projects/515472562394/locations/global/workloadIdentityPools/github/providers/spark-mcp-oidc' }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT || 'gh-deployer@spark-mcp-gateway-v3.iam.gserviceaccount.com' }}
 
       - name: Terraform Init & Validate (PR - Live Backend)
         if: ${{ github.event_name == 'pull_request' && steps.pr_auth.outcome == 'success' }}
@@ -176,7 +176,7 @@ jobs:
             const outcome = process.env.PLAN_OUTCOME === 'success' ? 'Succeeded' : 'Failed';
             cleanBody = [
               marker,
-              `### Spark MCP Gateway Terraform \`plan\` ${outcome} for State: \`gs://group-511516-tfstate/spark-mcp-gateway/terraform/state\``,
+              `### Spark MCP Gateway Terraform \`plan\` ${outcome} for State: \`gs://spark-mcp-gateway-v3-tfstate/spark-mcp-gateway/terraform/state\``,
               '',
               '<details><summary>Show Output</summary>',
               '',
@@ -195,9 +195,9 @@ jobs:
               '- `terraform fmt -check -recursive`: **Passed**',
               '- `terraform init -backend=false`: **Passed**',
               `- \`terraform validate\`: **${outcome === 'Succeeded' ? 'Passed' : 'Failed'}**`,
-              '- Isolated state prefix: `gs://group-511516-tfstate/spark-mcp-gateway/terraform/state`',
+              '- Isolated state prefix: `gs://spark-mcp-gateway-v3-tfstate/spark-mcp-gateway/terraform/state`',
               '',
-              '> **Note:** Workload Identity Federation (WIF) authentication is restricted by WIF attribute conditions to `refs/heads/main`. Live `terraform plan` and automatic `terraform apply` against GCS remote state (`gs://group-511516-tfstate/spark-mcp-gateway/terraform/state`) will execute automatically upon merge to `main`.',
+              '> **Note:** Workload Identity Federation (WIF) authentication is restricted by WIF attribute conditions to `refs/heads/main`. Live `terraform plan` and automatic `terraform apply` against GCS remote state (`gs://spark-mcp-gateway-v3-tfstate/spark-mcp-gateway/terraform/state`) will execute automatically upon merge to `main`.',
             ].join('\n');
           }
 
@@ -242,8 +242,8 @@ jobs:
         if: ${{ github.event_name != 'pull_request' }}
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER || 'projects/997395841168/locations/global/workloadIdentityPools/github/providers/spark-mcp-oidc' }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT || 'gh-deployer@group-511516.iam.gserviceaccount.com' }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER || 'projects/515472562394/locations/global/workloadIdentityPools/github/providers/spark-mcp-oidc' }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT || 'gh-deployer@spark-mcp-gateway-v3.iam.gserviceaccount.com' }}
 
       - name: Terraform Init & Validate
         if: ${{ github.event_name != 'pull_request' }}
@@ -297,7 +297,7 @@ jobs:
           const outcome = process.env.PLAN_OUTCOME === 'success' ? 'Succeeded' : 'Failed';
           const cleanBody = [
             '<!-- spark-mcp-gateway-terraform-plan-comment -->',
-            `### Spark MCP Gateway Terraform \`plan\` ${outcome} for State: \`gs://group-511516-tfstate/spark-mcp-gateway/terraform/state\``,
+            `### Spark MCP Gateway Terraform \`plan\` ${outcome} for State: \`gs://spark-mcp-gateway-v3-tfstate/spark-mcp-gateway/terraform/state\``,
             '',
             '<details><summary>Show Output</summary>',
             '',
@@ -409,10 +409,9 @@ jobs:
 
           const lines = [
             marker,
-            `### Spark MCP Gateway Terraform \`plan\`/\`apply\` ${outcome} for State: \`gs://group-511516-tfstate/spark-mcp-gateway/terraform/state\``,
+            `### Spark MCP Gateway Terraform \`apply\` ${outcome} for State: \`gs://spark-mcp-gateway-v3-tfstate/spark-mcp-gateway/terraform/state\``,
             '',
           ];
-          lines[1] = `### Spark MCP Gateway Terraform \`apply\` ${outcome} for State: \`gs://group-511516-tfstate/spark-mcp-gateway/terraform/state\``;
 
           if (serviceRows.length > 0) {
             lines.push('#### Deployed GCP Services');

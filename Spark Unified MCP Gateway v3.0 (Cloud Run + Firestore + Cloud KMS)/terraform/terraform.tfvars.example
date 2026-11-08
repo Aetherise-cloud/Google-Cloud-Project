@@ -5,8 +5,8 @@
 # cp terraform.tfvars.example terraform.tfvars
 # ==============================================================================
 
-project_id             = "group-511516"
-project_number         = "997395841168"
+project_id             = "spark-mcp-gateway-v3"
+project_number         = "515472562394"
 region                 = "asia-southeast1"
 service_name           = "spark-mcp-gateway"
 firestore_database_id  = "spark-mcp-db"
@@ -23,7 +23,7 @@ enable_custom_domain_mapping = false
 billing_account_id           = ""
 
 # Google OIDC for Admin Login (Google Cloud Console -> APIs & Services -> Credentials)
-google_oidc_client_id        = "997395841168-xxxxxxxxxxxxxxxxxxxxxxxx.apps.googleusercontent.com"
+google_oidc_client_id        = "515472562394-xxxxxxxxxxxxxxxxxxxxxxxx.apps.googleusercontent.com"
 google_oidc_client_secret    = "GOCSPX-xxxxxxxxxxxxxxxxxxxxxxxx"
 
 # GitHub OAuth App credentials (https://github.com/settings/developers)
@@ -35,6 +35,6 @@ github_allowed_write_repos   = "brendonang/Google Cloud Project"
 jira_oauth_client_id         = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 jira_oauth_client_secret     = "ATOAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
-# GitHub Actions deployer SA already provisioned in group-511516
-existing_gh_deployer_sa_email = "gh-deployer@group-511516.iam.gserviceaccount.com"
+# GitHub Actions deployer SA pre-bootstrapped in spark-mcp-gateway-v3
+existing_gh_deployer_sa_email = "gh-deployer@spark-mcp-gateway-v3.iam.gserviceaccount.com"
 create_wif_pool               = false
