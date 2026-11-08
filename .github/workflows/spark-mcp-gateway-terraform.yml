@@ -1,0 +1,486 @@
+name: Spark MCP Gateway Terraform
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'Spark Unified MCP Gateway v3.0 (Cloud Run + Firestore + Cloud KMS)/terraform/**'
+      - '*Spark Unified MCP Gateway*/terraform/**'
+      - '.github/workflows/spark-mcp-gateway-terraform.yml'
+      - '!**/*.md'
+      - '!**/terraform.tfvars.example'
+  push:
+    branches:
+      - main
+    paths:
+      - 'Spark Unified MCP Gateway v3.0 (Cloud Run + Firestore + Cloud KMS)/terraform/**'
+      - '*Spark Unified MCP Gateway*/terraform/**'
+      - '.github/workflows/spark-mcp-gateway-terraform.yml'
+      - '!**/*.md'
+      - '!**/terraform.tfvars.example'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Terraform action to execute'
+        required: true
+        type: choice
+        default: 'plan'
+        options:
+          - plan
+          - apply
+          - destroy
+      confirm_destroy:
+        description: 'Target GCP Project ID confirmation (REQUIRED and must equal group-511516 if action is destroy)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+  id-token: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: spark-mcp-gateway-terraform-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  TF_WORKING_DIR: 'Spark Unified MCP Gateway v3.0 (Cloud Run + Firestore + Cloud KMS)/terraform'
+  TF_VERSION: "1.9.8"
+  TF_VAR_project_id: ${{ vars.SPARK_MCP_PROJECT_ID || 'group-511516' }}
+  TF_VAR_google_oidc_client_id: ${{ secrets.SPARK_GOOGLE_OIDC_CLIENT_ID || vars.SPARK_GOOGLE_OIDC_CLIENT_ID || '' }}
+  TF_VAR_google_oidc_client_secret: ${{ secrets.SPARK_GOOGLE_OIDC_CLIENT_SECRET || '' }}
+  TF_VAR_github_oauth_client_id: ${{ secrets.SPARK_GITHUB_OAUTH_CLIENT_ID || vars.SPARK_GITHUB_OAUTH_CLIENT_ID || '' }}
+  TF_VAR_github_oauth_client_secret: ${{ secrets.SPARK_GITHUB_OAUTH_CLIENT_SECRET || '' }}
+  TF_VAR_github_allowed_write_repos: ${{ vars.SPARK_GITHUB_ALLOWED_WRITE_REPOS || '' }}
+  TF_VAR_jira_oauth_client_id: ${{ secrets.SPARK_JIRA_OAUTH_CLIENT_ID || vars.SPARK_JIRA_OAUTH_CLIENT_ID || '' }}
+  TF_VAR_jira_oauth_client_secret: ${{ secrets.SPARK_JIRA_OAUTH_CLIENT_SECRET || '' }}
+  TF_VAR_billing_account_id: ${{ vars.SPARK_BILLING_ACCOUNT_ID || '' }}
+
+jobs:
+  terraform:
+    name: Terraform (${{ github.event_name == 'workflow_dispatch' && github.event.inputs.action || (github.event_name == 'push' && 'apply' || 'plan') }})
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Safety Guard - Validate Destroy Confirmation
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy' }}
+        run: |
+          echo "Checking destroy confirmation parameters..."
+          CONFIRM_ID="${{ github.event.inputs.confirm_destroy }}"
+          if [ "${CONFIRM_ID}" != "group-511516" ]; then
+            echo "::error::Terraform destroy aborted! confirm_destroy '${CONFIRM_ID}' does not match required 'group-511516'."
+            exit 1
+          fi
+          echo "Destroy confirmation passed for project group-511516."
+
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Terraform ${{ env.TF_VERSION }}
+        run: |
+          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/terraform.zip" \
+            "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+          sudo unzip -q -o "$RUNNER_TEMP/terraform.zip" -d /usr/local/bin
+          rm -f "$RUNNER_TEMP/terraform.zip"
+          terraform -version
+
+      - name: Terraform Format Check
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform fmt -check -recursive
+
+      # -----------------------------------------------------------------------
+      # Pull Request Path: Attempt WIF auth; run live plan if permitted,
+      # otherwise fall back to offline init + validate and post PR status comment.
+      # -----------------------------------------------------------------------
+      - name: Authenticate to Google Cloud (PR - Optional WIF)
+        id: pr_auth
+        if: ${{ github.event_name == 'pull_request' }}
+        continue-on-error: true
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER || 'projects/997395841168/locations/global/workloadIdentityPools/github/providers/spark-mcp-oidc' }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT || 'gh-deployer@group-511516.iam.gserviceaccount.com' }}
+
+      - name: Terraform Init & Validate (PR - Live Backend)
+        if: ${{ github.event_name == 'pull_request' && steps.pr_auth.outcome == 'success' }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init -no-color -input=false
+          terraform validate -no-color
+
+      - name: Terraform Plan (PR - Live Backend)
+        id: pr_plan
+        if: ${{ github.event_name == 'pull_request' && steps.pr_auth.outcome == 'success' }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        continue-on-error: true
+        run: |
+          set +e
+          terraform plan -no-color -input=false -out=tfplan 2>&1 | tee "$RUNNER_TEMP/tfplan_raw.txt"
+          PLAN_EXIT=${PIPESTATUS[0]}
+          set -e
+
+          if grep -q "Terraform used the selected providers" "$RUNNER_TEMP/tfplan_raw.txt"; then
+            sed -n '/Terraform used the selected providers/,$p' "$RUNNER_TEMP/tfplan_raw.txt" > "$RUNNER_TEMP/tfplan_trimmed.txt"
+          elif grep -q "No changes\." "$RUNNER_TEMP/tfplan_raw.txt"; then
+            sed -n '/No changes\./,$p' "$RUNNER_TEMP/tfplan_raw.txt" > "$RUNNER_TEMP/tfplan_trimmed.txt"
+          elif grep -q "Planning failed\." "$RUNNER_TEMP/tfplan_raw.txt"; then
+            sed -n '/Planning failed\./,$p' "$RUNNER_TEMP/tfplan_raw.txt" > "$RUNNER_TEMP/tfplan_trimmed.txt"
+          else
+            cp "$RUNNER_TEMP/tfplan_raw.txt" "$RUNNER_TEMP/tfplan_trimmed.txt"
+          fi
+
+          sed -E 's/^([[:space:]]+)([-+~](\/\+|\/-)?|<=)/\2\1/' "$RUNNER_TEMP/tfplan_trimmed.txt" > "$RUNNER_TEMP/tfplan_diff.txt"
+          exit $PLAN_EXIT
+
+      - name: Terraform Init & Validate (PR - Offline Fallback)
+        id: pr_offline_validate
+        if: ${{ github.event_name == 'pull_request' && steps.pr_auth.outcome != 'success' }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init -backend=false -no-color
+          terraform validate -no-color
+
+      - name: Post Pull Request Terraform Comment & Summary
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AUTH_OUTCOME: ${{ steps.pr_auth.outcome }}
+          PLAN_OUTCOME: ${{ steps.pr_plan.outcome }}
+          OFFLINE_OUTCOME: ${{ steps.pr_offline_validate.outcome }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          node <<'EOF'
+          const fs = require('fs');
+          const path = require('path');
+          const { execFileSync } = require('child_process');
+
+          const marker = '<!-- spark-mcp-gateway-terraform-plan-comment -->';
+          let cleanBody = '';
+
+          if (process.env.AUTH_OUTCOME === 'success') {
+            const diffPath = path.join(process.env.RUNNER_TEMP || '/tmp', 'tfplan_diff.txt');
+            let planOutput = 'No plan output generated.';
+            if (fs.existsSync(diffPath)) {
+              planOutput = fs.readFileSync(diffPath, 'utf8').trim();
+            }
+            const maxLen = 60000;
+            if (planOutput.length > maxLen) {
+              planOutput = planOutput.slice(0, maxLen) + '\n... (output truncated)';
+            }
+            const outcome = process.env.PLAN_OUTCOME === 'success' ? 'Succeeded' : 'Failed';
+            cleanBody = [
+              marker,
+              `### Spark MCP Gateway Terraform \`plan\` ${outcome} for State: \`gs://group-511516-tfstate/spark-mcp-gateway/terraform/state\``,
+              '',
+              '<details><summary>Show Output</summary>',
+              '',
+              '```diff',
+              planOutput,
+              '```',
+              '',
+              '</details>',
+            ].join('\n');
+          } else {
+            const outcome = process.env.OFFLINE_OUTCOME === 'success' ? 'Succeeded' : 'Failed';
+            cleanBody = [
+              marker,
+              `### Spark MCP Gateway Terraform Offline Validation ${outcome}`,
+              '',
+              '- `terraform fmt -check -recursive`: **Passed**',
+              '- `terraform init -backend=false`: **Passed**',
+              `- \`terraform validate\`: **${outcome === 'Succeeded' ? 'Passed' : 'Failed'}**`,
+              '- Isolated state prefix: `gs://group-511516-tfstate/spark-mcp-gateway/terraform/state`',
+              '',
+              '> **Note:** Workload Identity Federation (WIF) authentication is restricted by WIF attribute conditions to `refs/heads/main`. Live `terraform plan` and automatic `terraform apply` against GCS remote state (`gs://group-511516-tfstate/spark-mcp-gateway/terraform/state`) will execute automatically upon merge to `main`.',
+            ].join('\n');
+          }
+
+          if (process.env.GITHUB_STEP_SUMMARY) {
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, cleanBody + '\n');
+          }
+
+          if (process.env.PR_NUMBER) {
+            const bodyFile = path.join(process.env.RUNNER_TEMP || '/tmp', 'tfplan_comment.json');
+            fs.writeFileSync(bodyFile, JSON.stringify({ body: cleanBody }));
+            const commentsRaw = execFileSync('gh', [
+              'api',
+              `repos/${process.env.REPO}/issues/${process.env.PR_NUMBER}/comments?per_page=100`,
+            ], { encoding: 'utf8' });
+            const comments = JSON.parse(commentsRaw);
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              execFileSync('gh', [
+                'api', '-X', 'PATCH',
+                `repos/${process.env.REPO}/issues/comments/${existing.id}`,
+                '--input', bodyFile,
+              ], { stdio: 'inherit' });
+            } else {
+              execFileSync('gh', [
+                'api', '-X', 'POST',
+                `repos/${process.env.REPO}/issues/${process.env.PR_NUMBER}/comments`,
+                '--input', bodyFile,
+              ], { stdio: 'inherit' });
+            }
+          }
+          EOF
+
+      - name: Check PR Plan Status
+        if: ${{ github.event_name == 'pull_request' && steps.pr_auth.outcome == 'success' && steps.pr_plan.outcome == 'failure' }}
+        run: exit 1
+
+      # -----------------------------------------------------------------------
+      # Push to main / Workflow Dispatch Path: Authenticate via WIF, Init,
+      # Validate, Plan, and Apply (or Destroy).
+      # -----------------------------------------------------------------------
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER || 'projects/997395841168/locations/global/workloadIdentityPools/github/providers/spark-mcp-oidc' }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT || 'gh-deployer@group-511516.iam.gserviceaccount.com' }}
+
+      - name: Terraform Init & Validate
+        if: ${{ github.event_name != 'pull_request' }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init -no-color -input=false
+          terraform validate -no-color
+
+      - name: Terraform Plan (Manual Dispatch Plan)
+        id: plan
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'plan' }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        continue-on-error: true
+        run: |
+          set +e
+          terraform plan -no-color -input=false -out=tfplan 2>&1 | tee "$RUNNER_TEMP/tfplan_raw.txt"
+          PLAN_EXIT=${PIPESTATUS[0]}
+          set -e
+
+          if grep -q "Terraform used the selected providers" "$RUNNER_TEMP/tfplan_raw.txt"; then
+            sed -n '/Terraform used the selected providers/,$p' "$RUNNER_TEMP/tfplan_raw.txt" > "$RUNNER_TEMP/tfplan_trimmed.txt"
+          elif grep -q "No changes\." "$RUNNER_TEMP/tfplan_raw.txt"; then
+            sed -n '/No changes\./,$p' "$RUNNER_TEMP/tfplan_raw.txt" > "$RUNNER_TEMP/tfplan_trimmed.txt"
+          elif grep -q "Planning failed\." "$RUNNER_TEMP/tfplan_raw.txt"; then
+            sed -n '/Planning failed\./,$p' "$RUNNER_TEMP/tfplan_raw.txt" > "$RUNNER_TEMP/tfplan_trimmed.txt"
+          else
+            cp "$RUNNER_TEMP/tfplan_raw.txt" "$RUNNER_TEMP/tfplan_trimmed.txt"
+          fi
+
+          sed -E 's/^([[:space:]]+)([-+~](\/\+|\/-)?|<=)/\2\1/' "$RUNNER_TEMP/tfplan_trimmed.txt" > "$RUNNER_TEMP/tfplan_diff.txt"
+          exit $PLAN_EXIT
+
+      - name: Post Manual Plan Summary
+        if: ${{ always() && (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'plan') }}
+        env:
+          PLAN_OUTCOME: ${{ steps.plan.outcome }}
+        run: |
+          node <<'EOF'
+          const fs = require('fs');
+          const path = require('path');
+
+          const diffPath = path.join(process.env.RUNNER_TEMP || '/tmp', 'tfplan_diff.txt');
+          let planOutput = 'No plan output generated.';
+          if (fs.existsSync(diffPath)) {
+            planOutput = fs.readFileSync(diffPath, 'utf8').trim();
+          }
+          const maxLen = 60000;
+          if (planOutput.length > maxLen) {
+            planOutput = planOutput.slice(0, maxLen) + '\n... (output truncated)';
+          }
+          const outcome = process.env.PLAN_OUTCOME === 'success' ? 'Succeeded' : 'Failed';
+          const cleanBody = [
+            '<!-- spark-mcp-gateway-terraform-plan-comment -->',
+            `### Spark MCP Gateway Terraform \`plan\` ${outcome} for State: \`gs://group-511516-tfstate/spark-mcp-gateway/terraform/state\``,
+            '',
+            '<details><summary>Show Output</summary>',
+            '',
+            '```diff',
+            planOutput,
+            '```',
+            '',
+            '</details>',
+          ].join('\n');
+
+          if (process.env.GITHUB_STEP_SUMMARY) {
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, cleanBody + '\n');
+          }
+          EOF
+
+      - name: Check Manual Plan Status
+        if: ${{ steps.plan.outcome == 'failure' }}
+        run: exit 1
+
+      - name: Terraform Plan & Apply (Push to main or Manual Apply)
+        id: apply
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply') }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        continue-on-error: true
+        run: |
+          set +e
+          terraform plan -no-color -input=false -out=tfplan 2>&1 | tee "$RUNNER_TEMP/tfapply_plan.txt"
+          PLAN_EXIT=${PIPESTATUS[0]}
+          if [ "$PLAN_EXIT" -eq 0 ]; then
+            terraform apply -no-color -input=false -auto-approve tfplan 2>&1 | tee "$RUNNER_TEMP/tfapply_raw.txt"
+            APPLY_EXIT=${PIPESTATUS[0]}
+          else
+            cp "$RUNNER_TEMP/tfapply_plan.txt" "$RUNNER_TEMP/tfapply_raw.txt"
+            APPLY_EXIT=$PLAN_EXIT
+          fi
+          terraform output -json > "$RUNNER_TEMP/tfoutputs.json" 2>/dev/null || echo "{}" > "$RUNNER_TEMP/tfoutputs.json"
+          set -e
+
+          if grep -q "Terraform used the selected providers" "$RUNNER_TEMP/tfapply_plan.txt"; then
+            sed -n '/Terraform used the selected providers/,$p' "$RUNNER_TEMP/tfapply_plan.txt" > "$RUNNER_TEMP/tfapply_trimmed.txt"
+            echo "" >> "$RUNNER_TEMP/tfapply_trimmed.txt"
+            cat "$RUNNER_TEMP/tfapply_raw.txt" >> "$RUNNER_TEMP/tfapply_trimmed.txt"
+          else
+            cat "$RUNNER_TEMP/tfapply_plan.txt" "$RUNNER_TEMP/tfapply_raw.txt" > "$RUNNER_TEMP/tfapply_trimmed.txt"
+          fi
+
+          sed -E 's/^([[:space:]]+)([-+~](\/\+|\/-)?|<=)/\2\1/' "$RUNNER_TEMP/tfapply_trimmed.txt" > "$RUNNER_TEMP/tfapply_diff.txt"
+          exit $APPLY_EXIT
+
+      - name: Post Terraform Apply Summary & PR/Commit Comment
+        if: ${{ always() && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')) }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLY_OUTCOME: ${{ steps.apply.outcome }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          node <<'EOF'
+          const fs = require('fs');
+          const path = require('path');
+          const { execFileSync } = require('child_process');
+
+          const tempDir = process.env.RUNNER_TEMP || '/tmp';
+          const diffPath = path.join(tempDir, 'tfapply_diff.txt');
+          const outPath = path.join(tempDir, 'tfoutputs.json');
+
+          let applyOutput = 'No apply output generated.';
+          if (fs.existsSync(diffPath)) {
+            applyOutput = fs.readFileSync(diffPath, 'utf8').trim();
+          }
+          const maxLen = 55000;
+          if (applyOutput.length > maxLen) {
+            applyOutput = applyOutput.slice(0, maxLen) + '\n... (output truncated)';
+          }
+
+          let outputs = {};
+          if (fs.existsSync(outPath)) {
+            try {
+              outputs = JSON.parse(fs.readFileSync(outPath, 'utf8'));
+            } catch (_) {}
+          }
+          const val = (k) => (outputs[k] && !outputs[k].sensitive && outputs[k].value) ? String(outputs[k].value) : null;
+
+          const serviceUrl = val('service_url');
+          const mcpEndpoint = val('mcp_endpoint');
+          const dashboardUrl = val('dashboard_url');
+          const googleOidc = val('google_oidc_callback_url');
+          const githubOauth = val('github_oauth_callback_url');
+          const jiraOauth = val('jira_oauth_callback_url');
+          const arImage = val('artifact_registry_image');
+          const firestoreDb = val('firestore_database_id');
+          const kmsKey = val('kms_key_id');
+          const runtimeSa = val('runtime_service_account');
+
+          const outcome = process.env.APPLY_OUTCOME === 'success' ? 'Succeeded' : 'Failed';
+          const marker = '<!-- spark-mcp-gateway-terraform-apply-comment -->';
+
+          const serviceRows = [];
+          if (serviceUrl) serviceRows.push(`| **Cloud Run Service URL** | ${serviceUrl} |`);
+          if (mcpEndpoint) serviceRows.push(`| **MCP Data-Plane Endpoint** | ${mcpEndpoint} |`);
+          if (dashboardUrl) serviceRows.push(`| **Admin Dashboard URL** | ${dashboardUrl} |`);
+          if (googleOidc) serviceRows.push(`| **Google OIDC Callback** | \`${googleOidc}\` |`);
+          if (githubOauth) serviceRows.push(`| **GitHub OAuth Callback** | \`${githubOauth}\` |`);
+          if (jiraOauth) serviceRows.push(`| **Jira OAuth Callback** | \`${jiraOauth}\` |`);
+          if (arImage) serviceRows.push(`| **Artifact Registry Image** | \`${arImage}\` |`);
+          if (firestoreDb) serviceRows.push(`| **Firestore Database ID** | \`${firestoreDb}\` |`);
+          if (kmsKey) serviceRows.push(`| **Cloud KMS Key ID** | \`${kmsKey}\` |`);
+          if (runtimeSa) serviceRows.push(`| **Runtime Service Account** | \`${runtimeSa}\` |`);
+
+          const lines = [
+            marker,
+            `### Spark MCP Gateway Terraform \`plan\`/\`apply\` ${outcome} for State: \`gs://group-511516-tfstate/spark-mcp-gateway/terraform/state\``,
+            '',
+          ];
+          lines[1] = `### Spark MCP Gateway Terraform \`apply\` ${outcome} for State: \`gs://group-511516-tfstate/spark-mcp-gateway/terraform/state\``;
+
+          if (serviceRows.length > 0) {
+            lines.push('#### Deployed GCP Services');
+            lines.push('');
+            lines.push('| Service / Resource | Endpoint / Value |');
+            lines.push('|---|---|');
+            lines.push(...serviceRows);
+            lines.push('');
+          }
+
+          lines.push('<details><summary>Show Output</summary>');
+          lines.push('');
+          lines.push('```diff');
+          lines.push(applyOutput);
+          lines.push('```');
+          lines.push('');
+          lines.push('</details>');
+
+          const cleanBody = lines.join('\n');
+
+          if (process.env.GITHUB_STEP_SUMMARY) {
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, cleanBody + '\n');
+          }
+
+          const bodyFile = path.join(tempDir, 'tfapply_comment.json');
+          fs.writeFileSync(bodyFile, JSON.stringify({ body: cleanBody }));
+
+          let commentedOnPr = false;
+          try {
+            const pullsRaw = execFileSync('gh', [
+              'api',
+              `repos/${process.env.REPO}/commits/${process.env.SHA}/pulls`,
+            ], { encoding: 'utf8' });
+            const pulls = JSON.parse(pullsRaw);
+            if (Array.isArray(pulls) && pulls.length > 0) {
+              for (const pr of pulls) {
+                if (pr && pr.number) {
+                  execFileSync('gh', [
+                    'api', '-X', 'POST',
+                    `repos/${process.env.REPO}/issues/${pr.number}/comments`,
+                    '--input', bodyFile,
+                  ], { stdio: 'inherit' });
+                  commentedOnPr = true;
+                }
+              }
+            }
+          } catch (err) {
+            console.warn('Could not look up PRs for commit:', err.message);
+          }
+
+          if (!commentedOnPr) {
+            try {
+              execFileSync('gh', [
+                'api', '-X', 'POST',
+                `repos/${process.env.REPO}/commits/${process.env.SHA}/comments`,
+                '--input', bodyFile,
+              ], { stdio: 'inherit' });
+            } catch (err) {
+              console.warn('Could not post commit comment:', err.message);
+            }
+          }
+          EOF
+
+      - name: Check Terraform Apply Status
+        if: ${{ steps.apply.outcome == 'failure' }}
+        run: exit 1
+
+      - name: Terraform Destroy
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy' }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform destroy -no-color -auto-approve

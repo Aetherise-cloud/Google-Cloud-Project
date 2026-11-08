@@ -1,0 +1,50 @@
+# Git & GitHub
+.git/
+.gitignore
+.github/
+
+# Terraform infrastructure
+terraform/
+*.tf
+*.tfvars
+*.tfvars.example
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform/
+.terraform.lock.hcl
+
+# Documentation & Markdown
+*.md
+docs/
+
+# Tests & Coverage
+*_test.go
+coverage.out
+coverage.html
+testdata/
+
+# Environment files & secrets
+.env
+.env.*
+*.env
+*key*
+*.pem
+*.key
+*.crt
+id_rsa*
+*.secret
+
+# IDEs & Editor metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Local scratch & artifacts
+scratch/
+tmp/
+dist/
+bin/

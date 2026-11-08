@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard &mdash; Spark Unified MCP Gateway v3.0</title>
+  {{template "styles" .}}
+</head>
+<body>
+  <header class="app-header">
+    <div class="app-header-content">
+      <div class="brand">
+        <div class="brand-logo">S</div>
+        <div>
+          <div class="brand-title">Spark Unified MCP Gateway v3.0</div>
+          <div class="brand-subtitle">Control Plane Dashboard</div>
+        </div>
+      </div>
+      <div class="user-nav">
+        <span class="user-badge">{{.AdminEmail}}</span>
+        <form method="POST" action="/auth/logout" style="margin: 0; display: inline;">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <button type="submit" class="btn btn-sm btn-outline">Sign Out</button>
+        </form>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    {{if .FlashMessage}}
+    <div class="alert alert-success" role="status">
+      <span>{{.FlashMessage}}</span>
+    </div>
+    {{end}}
+
+    <div class="endpoint-banner">
+      <div class="endpoint-header">
+        <span class="endpoint-title">Gemini Spark / Cursor Direct-Link Endpoint</span>
+        <span class="text-muted">Use this URL in your MCP client configuration</span>
+      </div>
+      <div class="endpoint-code-box">
+        <div class="endpoint-code" id="mcp-endpoint-val">{{.MCPEndpoint}}</div>
+        <button type="button" class="btn btn-sm btn-primary" id="copy-endpoint-btn" onclick="copyMCPEndpoint()">Copy</button>
+      </div>
+    </div>
+
+    <section>
+      <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px;">
+        <h2>Connector Marketplace</h2>
+        <span class="text-muted">Managed third-party and keyless ADC backends</span>
+      </div>
+
+      <div class="marketplace-grid">
+        {{range .Connectors}}
+        <div class="connector-card" id="connector-card-{{.ID}}">
+          <div>
+            <div class="connector-header">
+              <div class="connector-title-box">
+                <span class="connector-name">{{.Name}}</span>
+              </div>
+              <div class="connector-badges">
+                {{if .KeylessADC}}
+                  <span class="badge badge-adc">Active (Keyless ADC)</span>
+                  <span class="badge badge-readonly">Read-Only</span>
+                {{else}}
+                  {{if .Connected}}
+                    <span class="badge badge-connected">Connected</span>
+                  {{else}}
+                    <span class="badge badge-disconnected">Not Connected</span>
+                  {{end}}
+                {{end}}
+              </div>
+            </div>
+
+            <p class="connector-desc">{{.Description}}</p>
+
+            <div class="connector-meta">
+              {{if .AccountLabel}}
+              <div class="connector-meta-row">
+                <span class="meta-label">Account:</span>
+                <span class="meta-val">{{.AccountLabel}}</span>
+              </div>
+              {{end}}
+              {{if .UpdatedAt}}
+              <div class="connector-meta-row">
+                <span class="meta-label">Updated:</span>
+                <span class="meta-val">{{.UpdatedAt}}</span>
+              </div>
+              {{end}}
+              <div class="connector-meta-row">
+                <span class="meta-label">Type:</span>
+                <span class="meta-val">{{if .KeylessADC}}Keyless Google ADC{{else}}OAuth 2.0 Integration{{end}}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="connector-actions">
+            {{if .KeylessADC}}
+              <div class="text-muted" style="font-size: 0.82rem; font-style: italic;">
+                Always active via Google Cloud Application Default Credentials. No manual authorization required.
+              </div>
+            {{else}}
+              <div class="scope-select-row">
+                <label for="scope-{{.ID}}" style="color: var(--text-muted);">Scope:</label>
+                <select id="scope-{{.ID}}" name="scope" class="form-select" style="font-size: 0.82rem; padding: 4px 8px;">
+                  <option value="read_only" {{if or (eq .ScopeMode "read_only") (not .ScopeMode)}}selected{{end}}>Read Only (Recommended)</option>
+                  <option value="full_access" {{if eq .ScopeMode "full_access"}}selected{{end}}>Full Access (Read + Write)</option>
+                </select>
+              </div>
+
+              <div class="btn-row">
+                <button type="button" class="btn btn-sm btn-primary" onclick="openConnectPopup('{{.ID}}')">
+                  {{if .Connected}}Reconnect{{else}}Connect{{end}}
+                </button>
+                {{if .Connected}}
+                <form method="POST" action="/api/connections/{{.ID}}/disconnect" style="margin: 0; display: inline;">
+                  <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                  <button type="submit" class="btn btn-sm btn-danger">Disconnect</button>
+                </form>
+                {{end}}
+              </div>
+            {{end}}
+          </div>
+        </div>
+        {{end}}
+      </div>
+    </section>
+  </main>
+
+  <script>
+    function copyMCPEndpoint() {
+      var text = {{.MCPEndpoint}};
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function() {
+          var btn = document.getElementById('copy-endpoint-btn');
+          if (btn) {
+            var orig = btn.innerText;
+            btn.innerText = 'Copied!';
+            setTimeout(function() { btn.innerText = orig; }, 2000);
+          }
+        });
+      }
+    }
+
+    function openConnectPopup(id) {
+      var sel = document.getElementById('scope-' + id);
+      var mode = sel ? sel.value : 'read_only';
+      window.open('/oauth/connect/' + encodeURIComponent(id) + '?mode=' + encodeURIComponent(mode), 'spark_oauth_popup', 'width=620,height=720');
+    }
+
+    window.addEventListener('message', function(event) {
+      if (event.origin !== window.location.origin) return;
+      if (event.data && event.data.type === 'spark-mcp-connected') {
+        window.location.reload();
+      }
+    });
+  </script>
+</body>
+</html>

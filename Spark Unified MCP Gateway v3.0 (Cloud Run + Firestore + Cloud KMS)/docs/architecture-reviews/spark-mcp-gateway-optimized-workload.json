@@ -1,0 +1,213 @@
+{
+  "project": "spark-mcp-gateway-optimized",
+  "region": "asia-southeast1",
+  "currency": "USD",
+  "applyFreeTier": true,
+  "rateOverrides": {
+    "cloudRun": {
+      "requestVcpuSecondUsd": 0.0000336,
+      "requestGibSecondUsd": 0.0000035,
+      "requestPerMillionUsd": 0.40
+    }
+  },
+  "tiers": {
+    "mvp": {
+      "label": "MVP / Low (1 admin, 3k MCP req/mo, 500 GDK searches)",
+      "traffic": { "monthlyRequests": 3000 },
+      "compute": {
+        "cloudRun": [
+          {
+            "name": "spark-mcp-gateway",
+            "cpu": 1,
+            "memoryGiB": 0.5,
+            "concurrency": 40,
+            "avgExecutionMs": 350,
+            "monthlyRequests": 3000,
+            "minInstances": 0,
+            "cpuAlwaysAllocated": false
+          }
+        ]
+      },
+      "databases": {
+        "firestore": {
+          "storageGiB": 0.05,
+          "readsPerMonth": 1800,
+          "writesPerMonth": 450,
+          "deletesPerMonth": 150
+        }
+      },
+      "storage": {
+        "cloudStorage": {
+          "standardGiB": 0.15,
+          "classAOperations": 30,
+          "classBOperations": 30,
+          "egressGiB": 0
+        }
+      },
+      "messagingAndOps": {
+        "secretManager": {
+          "activeSecretVersions": 4,
+          "accessOperations": 200
+        },
+        "artifactRegistry": {
+          "storageGiB": 0.25
+        },
+        "cloudLogging": {
+          "monthlyIngestedGiB": 0.006
+        }
+      },
+      "customLineItems": [
+        {
+          "name": "Cloud KMS Symmetric KEK (1 active version @ $0.06 + ~300 envelope ops @ $0.03/10k)",
+          "category": "ops",
+          "monthlyUnits": 1,
+          "unitPriceUsd": 0.0609
+        },
+        {
+          "name": "Firestore PITR 7-Day Continuous Backup (0.05 GiB @ $0.18/GiB-mo)",
+          "category": "database",
+          "monthlyUnits": 0.05,
+          "unitPriceUsd": 0.18
+        },
+        {
+          "name": "Google Developer Knowledge API v1 via Keyless ADC (500 queries/mo @ $0.00)",
+          "category": "ai",
+          "monthlyUnits": 500,
+          "unitPriceUsd": 0.0
+        }
+      ]
+    },
+    "baseline": {
+      "label": "Expected Baseline (10 users, 60k MCP req/mo, 5k GDK searches)",
+      "traffic": { "monthlyRequests": 60000 },
+      "compute": {
+        "cloudRun": [
+          {
+            "name": "spark-mcp-gateway",
+            "cpu": 1,
+            "memoryGiB": 0.5,
+            "concurrency": 40,
+            "avgExecutionMs": 350,
+            "monthlyRequests": 60000,
+            "minInstances": 0,
+            "cpuAlwaysAllocated": false
+          }
+        ]
+      },
+      "databases": {
+        "firestore": {
+          "storageGiB": 0.20,
+          "readsPerMonth": 36000,
+          "writesPerMonth": 9000,
+          "deletesPerMonth": 3000
+        }
+      },
+      "storage": {
+        "cloudStorage": {
+          "standardGiB": 0.60,
+          "classAOperations": 30,
+          "classBOperations": 60,
+          "egressGiB": 0
+        }
+      },
+      "messagingAndOps": {
+        "secretManager": {
+          "activeSecretVersions": 4,
+          "accessOperations": 800
+        },
+        "artifactRegistry": {
+          "storageGiB": 0.25
+        },
+        "cloudLogging": {
+          "monthlyIngestedGiB": 0.12
+        }
+      },
+      "customLineItems": [
+        {
+          "name": "Cloud KMS Symmetric KEK (1 active version @ $0.06 + ~6,000 envelope ops @ $0.03/10k)",
+          "category": "ops",
+          "monthlyUnits": 1,
+          "unitPriceUsd": 0.078
+        },
+        {
+          "name": "Firestore PITR 7-Day Continuous Backup (0.20 GiB @ $0.18/GiB-mo)",
+          "category": "database",
+          "monthlyUnits": 0.20,
+          "unitPriceUsd": 0.18
+        },
+        {
+          "name": "Google Developer Knowledge API v1 via Keyless ADC (5,000 queries/mo @ $0.00)",
+          "category": "ai",
+          "monthlyUnits": 5000,
+          "unitPriceUsd": 0.0
+        }
+      ]
+    },
+    "scale": {
+      "label": "Peak / Scale (100 users, 1M MCP req/mo, 50k GDK searches)",
+      "traffic": { "monthlyRequests": 1000000 },
+      "compute": {
+        "cloudRun": [
+          {
+            "name": "spark-mcp-gateway",
+            "cpu": 1,
+            "memoryGiB": 0.5,
+            "concurrency": 40,
+            "avgExecutionMs": 350,
+            "monthlyRequests": 1000000,
+            "minInstances": 0,
+            "cpuAlwaysAllocated": false
+          }
+        ]
+      },
+      "databases": {
+        "firestore": {
+          "storageGiB": 1.0,
+          "readsPerMonth": 600000,
+          "writesPerMonth": 150000,
+          "deletesPerMonth": 50000
+        }
+      },
+      "storage": {
+        "cloudStorage": {
+          "standardGiB": 3.0,
+          "classAOperations": 60,
+          "classBOperations": 120,
+          "egressGiB": 0
+        }
+      },
+      "messagingAndOps": {
+        "secretManager": {
+          "activeSecretVersions": 4,
+          "accessOperations": 4000
+        },
+        "artifactRegistry": {
+          "storageGiB": 0.25
+        },
+        "cloudLogging": {
+          "monthlyIngestedGiB": 2.0
+        }
+      },
+      "customLineItems": [
+        {
+          "name": "Cloud KMS Symmetric KEK (1 active version @ $0.06 + ~100,000 envelope ops @ $0.03/10k)",
+          "category": "ops",
+          "monthlyUnits": 1,
+          "unitPriceUsd": 0.36
+        },
+        {
+          "name": "Firestore PITR 7-Day Continuous Backup (1.0 GiB @ $0.18/GiB-mo)",
+          "category": "database",
+          "monthlyUnits": 1.0,
+          "unitPriceUsd": 0.18
+        },
+        {
+          "name": "Google Developer Knowledge API v1 via Keyless ADC (50,000 queries/mo @ $0.00)",
+          "category": "ai",
+          "monthlyUnits": 50000,
+          "unitPriceUsd": 0.0
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,226 @@
+# Spark MCP Gateway CI: runs on pull requests and pushes touching gateway files,
+# and via workflow_call from spark-mcp-gateway-deploy.yml before production deployment.
+name: Spark MCP Gateway CI
+
+on:
+  pull_request:
+    branches: [main, staging]
+  push:
+    branches: [main, staging]
+    paths:
+      - '**/cmd/gateway/**'
+      - '**/internal/**'
+      - '**/go.mod'
+      - '**/go.sum'
+      - '*Spark Unified MCP Gateway*/**'
+      - '.github/workflows/spark-mcp-gateway-ci.yml'
+      - '!**/*.md'
+  workflow_call:
+    inputs:
+      run_all:
+        description: 'Run every job regardless of changed files filter'
+        type: boolean
+        default: false
+      skip_docker:
+        description: 'Skip the standalone Docker build job when deploy workflow builds image'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spark-mcp-gateway-ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+      docker: ${{ steps.filter.outputs.docker }}
+      terraform: ${{ steps.filter.outputs.terraform }}
+    steps:
+      - name: Checkout for diff
+        if: ${{ !inputs.run_all && github.event_name != 'pull_request' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Filter changed files
+        id: filter
+        if: ${{ !inputs.run_all }}
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          predicate-quantifier: some-with-excludes
+          filters: |
+            go:
+              - '**/cmd/gateway/**'
+              - '**/internal/**'
+              - '**/go.mod'
+              - '**/go.sum'
+              - 'Spark Unified MCP Gateway v3.0 (Cloud Run + Firestore + Cloud KMS)/**/*.go'
+              - '.github/workflows/spark-mcp-gateway-ci.yml'
+              - '!**/*.md'
+            docker:
+              - '**/cmd/gateway/**'
+              - '**/internal/**'
+              - '**/go.mod'
+              - '**/go.sum'
+              - '*Spark Unified MCP Gateway*/Dockerfile'
+              - '*Spark Unified MCP Gateway*/.dockerignore'
+              - '.github/workflows/spark-mcp-gateway-ci.yml'
+              - '!**/*.md'
+            terraform:
+              - '*Spark Unified MCP Gateway*/terraform/**'
+              - '.github/workflows/spark-mcp-gateway-ci.yml'
+              - '!**/*.md'
+              - '!**/terraform.tfvars.example'
+
+  go-test:
+    name: Go 1.23 vet & tests
+    needs: changes
+    if: needs.changes.outputs.go == 'true' || inputs.run_all == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: 'Spark Unified MCP Gateway v3.0 (Cloud Run + Firestore + Cloud KMS)'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go 1.23
+        uses: actions/setup-go@41dfa10bad2bb2ae585af6ee5bb4d7d973ad74ed # v5.1.0
+        with:
+          go-version: '1.23'
+          cache: true
+          cache-dependency-path: 'Spark Unified MCP Gateway v3.0 (Cloud Run + Firestore + Cloud KMS)/go.mod'
+
+      - name: Go Vet
+        run: go vet ./...
+
+      - name: Go Tests (-race)
+        run: go test -race -v -cover ./...
+
+  docker-build:
+    name: Distroless Docker build & size gate (< 30 MB)
+    needs: changes
+    if: (needs.changes.outputs.docker == 'true' || inputs.run_all == true) && !inputs.skip_docker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build Distroless Image
+        run: |
+          docker build --platform linux/amd64 \
+            -t spark-mcp-gateway:ci \
+            "Spark Unified MCP Gateway v3.0 (Cloud Run + Firestore + Cloud KMS)"
+
+      - name: Verify Image Size Gate (< 30 MB uncompressed)
+        run: |
+          SIZE_BYTES=$(docker image inspect spark-mcp-gateway:ci --format='{{.Size}}')
+          SIZE_MB=$(echo "scale=2; ${SIZE_BYTES} / 1048576" | bc)
+          echo "Distroless Image Size: ${SIZE_MB} MB (${SIZE_BYTES} bytes)"
+          # 30 MB = 30 * 1024 * 1024 = 31,457,280 bytes
+          if [ "${SIZE_BYTES}" -ge 31457280 ]; then
+            echo "::error::Image size (${SIZE_MB} MB) exceeds maximum allowed threshold of 30 MB!"
+            exit 1
+          fi
+          echo "Image size check passed: ${SIZE_MB} MB < 30 MB"
+
+  terraform-check:
+    name: Terraform format & validate
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true' || inputs.run_all == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: 'Spark Unified MCP Gateway v3.0 (Cloud Run + Firestore + Cloud KMS)/terraform'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Terraform 1.5.7
+        run: |
+          TF_VERSION="1.5.7"
+          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/terraform.zip" \
+            "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+          sudo unzip -q -o "$RUNNER_TEMP/terraform.zip" -d /usr/local/bin
+          rm -f "$RUNNER_TEMP/terraform.zip"
+          terraform -version
+
+      - name: Terraform Format Check
+        run: terraform fmt -check
+
+      - name: Terraform Init (Offline)
+        run: terraform init -backend=false -no-color
+
+      - name: Terraform Validate
+        run: terraform validate -no-color
+
+  secret-scan:
+    name: Secret scan (gitleaks)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks
+        run: |
+          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" version
+
+      - name: Scan PR commits
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          range="$PR_BASE..$PR_HEAD"
+          echo "Scanning range: $range"
+          "$RUNNER_TEMP/gitleaks" git --no-banner --redact --verbose --exit-code 1 --log-opts="$range" .
+
+  result:
+    name: Spark MCP Gateway CI result
+    if: always()
+    needs: [changes, go-test, docker-build, terraform-check, secret-scan]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check job results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          bad=$(echo "$NEEDS" | jq -r '[to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key] | join(", ")')
+          if [ -n "$bad" ]; then
+            echo "::error::Failed or cancelled jobs: $bad"
+            exit 1
+          fi
+          echo "All required CI status checks passed or were skipped."

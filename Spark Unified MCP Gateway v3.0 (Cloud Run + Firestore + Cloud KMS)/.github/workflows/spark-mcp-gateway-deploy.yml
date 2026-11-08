@@ -1,0 +1,298 @@
+# Spark Unified MCP Gateway v3.0 production deploy workflow.
+#
+# Push to main that touches gateway files -> full CI -> build + push
+# gateway:sha-<commit> -> deploy candidate revision with NO traffic and cand-<sha7> tag ->
+# verify revision conditions (avoiding Issue #9 Retired trap) ->
+# smoke test /health, OAuth discovery, JWKS, and unauthenticated POST /mcp ->
+# promote LATEST = 100% -> remove candidate tag.
+# If anything fails, traffic stays pinned to the previously serving revision.
+name: Spark MCP Gateway Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/cmd/gateway/**'
+      - '**/internal/**'
+      - '**/go.mod'
+      - '**/go.sum'
+      - '*Spark Unified MCP Gateway*/Dockerfile'
+      - '*Spark Unified MCP Gateway*/.dockerignore'
+      - 'Spark Unified MCP Gateway v3.0 (Cloud Run + Firestore + Cloud KMS)/**'
+      - '!Spark Unified MCP Gateway v3.0 (Cloud Run + Firestore + Cloud KMS)/terraform/**'
+      - '!Spark Unified MCP Gateway v3.0 (Cloud Run + Firestore + Cloud KMS)/README.md'
+      - '!**/*.md'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: spark-mcp-gateway-production
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: group-511516
+  REGION: asia-southeast1
+  SERVICE: spark-mcp-gateway
+  IMAGE: asia-southeast1-docker.pkg.dev/group-511516/spark-gateway/gateway
+  WIF_PROVIDER: projects/997395841168/locations/global/workloadIdentityPools/github/providers/github-oidc
+  DEPLOYER_SA: gh-deployer@group-511516.iam.gserviceaccount.com
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/spark-mcp-gateway-ci.yml
+    with:
+      run_all: ${{ github.event_name == 'workflow_dispatch' }}
+      skip_docker: true
+    permissions:
+      contents: read
+      pull-requests: read
+
+  deploy:
+    name: Deploy to Cloud Run (production)
+    needs: ci
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # GitHub OIDC token for Workload Identity Federation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOYER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          version: "589.0.0"
+
+      - name: Record the revision currently serving traffic
+        id: before
+        run: |
+          echo "Resolving currently serving revision for $SERVICE (polling up to 5m for initial Terraform bootstrap)..."
+          found=0
+          for i in $(seq 1 30); do
+            if gcloud run services describe "$SERVICE" --region "$REGION" --project "$PROJECT_ID" --format=json > "$RUNNER_TEMP/before.json" 2>/dev/null; then
+              prev=$(jq -r '[.status.traffic[]? | select((.percent // 0) > 0)] | max_by(.percent) | .revisionName // empty' "$RUNNER_TEMP/before.json")
+              split=$(jq -r '[.status.traffic[]? | select((.percent // 0) > 0) | "\(.revisionName)=\(.percent)"] | join(",")' "$RUNNER_TEMP/before.json")
+              if [ -n "$prev" ] && [ -n "$split" ]; then
+                found=1
+                break
+              fi
+            fi
+            echo "Attempt $i/30: Service not ready or no active traffic split yet. Waiting 10s for Terraform apply..."
+            sleep 10
+          done
+
+          if [ "$found" -ne 1 ]; then
+            echo "::error::Could not determine the revision currently serving traffic after 5 minutes; refusing to deploy without a rollback target."
+            exit 1
+          fi
+          echo "Serving before deploy: $split"
+          echo "revision=$prev" >> "$GITHUB_OUTPUT"
+          echo "split=$split" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        id: image
+        run: |
+          tag="sha-${GITHUB_SHA}"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build --platform linux/amd64 \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            -t "${IMAGE}:${tag}" "Spark Unified MCP Gateway v3.0 (Cloud Run + Firestore + Cloud KMS)"
+          docker push "${IMAGE}:${tag}"
+          digest=$(gcloud artifacts docker images describe "${IMAGE}:${tag}" --format='value(image_summary.digest)')
+          if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Could not resolve the digest of ${IMAGE}:${tag} (got '${digest}')"
+            exit 1
+          fi
+          echo "Pushed ${IMAGE}:${tag} = ${digest}"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "ref=${IMAGE}@${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Name the candidate tag
+        id: tag
+        run: |
+          echo "name=cand-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy candidate revision (no traffic, tagged)
+        id: deploy
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          PREV: ${{ steps.before.outputs.revision }}
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          gcloud run deploy "$SERVICE" --image "$IMAGE_REF" --region "$REGION" --project "$PROJECT_ID" --no-traffic --tag "$TAG" --quiet
+          gcloud run services describe "$SERVICE" --region "$REGION" --project "$PROJECT_ID" --format=json > "$RUNNER_TEMP/after.json"
+          candidate=$(jq -r '.status.latestCreatedRevisionName // empty' "$RUNNER_TEMP/after.json")
+          if [ -z "$candidate" ] || [ "$candidate" = "$PREV" ]; then
+            echo "::error::No new revision was created (latest created: '$candidate', previous: '$PREV')"; exit 1
+          fi
+          echo "revision=$candidate" >> "$GITHUB_OUTPUT"
+          img=$(jq -r '.spec.template.spec.containers[0].image // empty' "$RUNNER_TEMP/after.json")
+          if [ "$img" != "$IMAGE_REF" ]; then
+            echo "::error::Service template image is '$img', expected '$IMAGE_REF'"; exit 1
+          fi
+          tag_rev=$(jq -r --arg t "$TAG" '[.status.traffic[]? | select(.tag == $t) | .revisionName] | first // empty' "$RUNNER_TEMP/after.json")
+          url=$(jq -r --arg t "$TAG" '[.status.traffic[]? | select(.tag == $t) | .url] | first // empty' "$RUNNER_TEMP/after.json")
+          if [ "$tag_rev" != "$candidate" ] || [[ "$url" != https://* ]]; then
+            echo "::error::Tag $TAG does not route to candidate $candidate (tag points at '$tag_rev', URL '$url')"; exit 1
+          fi
+
+          # Inspect candidate conditions (avoiding Issue #9 Retired trap)
+          seen_jq='(.status.conditions // []) as $c | ["Ready", "Active", "ContainerHealthy", "ResourcesAvailable"]
+            | map(. as $t | (first($c[] | select(.type == $t)) // null)
+                | if . == null then (if $t == "ResourcesAvailable" then empty else "\($t)=missing" end)
+                  else "\($t)=\(.status)\(if .reason then " (\(.reason))" else "" end)" end)
+            | join(", ")'
+          verdict_jq='def cond($t): first(.status.conditions[]? | select(.type == $t)) // null;
+            def true_or_missing($t): cond($t) | . == null or .status == "True";
+            (cond("Ready") | . != null and .status == "True") as $ready
+            | any(.status.conditions[]?; (.type == "Ready" or .type == "Active" or .type == "ResourcesAvailable")
+                and .reason == "Retired") as $retired
+            | if ($ready and ($retired | not) and true_or_missing("Active") and true_or_missing("ContainerHealthy")) | not then "fail"
+              elif cond("Active") != null and cond("ContainerHealthy") != null then "strict"
+              else "relaxed" end'
+
+          for attempt in $(seq 1 12); do
+            gcloud run revisions describe "$candidate" --region "$REGION" --project "$PROJECT_ID" --format=json > "$RUNNER_TEMP/candidate.json"
+            rev_img=$(jq -r '.spec.containers[0].image // empty' "$RUNNER_TEMP/candidate.json")
+            if [ "$rev_img" != "$IMAGE_REF" ]; then
+              echo "::error::Candidate $candidate runs image '$rev_img', expected '$IMAGE_REF'"; exit 1
+            fi
+            seen=$(jq -r "$seen_jq" "$RUNNER_TEMP/candidate.json")
+            verdict=$(jq -r "$verdict_jq" "$RUNNER_TEMP/candidate.json")
+            if [ "$verdict" = "strict" ]; then
+              break
+            fi
+            if [ "$attempt" -eq 12 ]; then
+              if [ "$verdict" = "relaxed" ]; then
+                echo "::warning::Candidate $candidate: $seen. Ready=True and nothing Retired, but Active/ContainerHealthy never appeared: relying on smoke test."
+                break
+              fi
+              echo "::error::Candidate $candidate never became ready (last seen: $seen)"; exit 1
+            fi
+            echo "Candidate $candidate: $seen (check ${attempt}); re-checking in 5 s"
+            sleep 5
+          done
+          echo "Candidate revision: $candidate ($seen)"
+          echo "Candidate URL: $url"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test candidate (read-only & auth challenge)
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          probe_get() {
+            local path=$1 check=$2 code attempt
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              code=$(curl -s -o "$RUNNER_TEMP/smoke.out" -w '%{http_code}' --max-time 15 --proto '=https' "${URL}${path}") || true
+              if [ "$code" = "200" ] && { [ "$check" != "json-ok" ] || jq -e '.status == "ok"' "$RUNNER_TEMP/smoke.out" >/dev/null 2>&1; }; then
+                echo "GET ${path} -> 200 (attempt ${attempt})"
+                return 0
+              fi
+              echo "GET ${path} -> ${code} (attempt ${attempt}); retrying in 6 s"
+              sleep 6
+            done
+            echo "::error::GET ${path} on the candidate never returned expected 200"
+            return 1
+          }
+
+          # 1. Health probe (NEVER /healthz!)
+          probe_get /health json-ok
+
+          # 2. OAuth 2.1 RFC 8414 Discovery probes
+          probe_get /.well-known/oauth-protected-resource status-only
+          probe_get /.well-known/oauth-authorization-server status-only
+
+          # 3. JWKS RFC 7517 endpoint probe
+          probe_get /.well-known/jwks.json status-only
+
+          # 4. Verify unauthenticated POST /mcp challenge returns HTTP 401 Unauthorized
+          echo "Verifying unauthenticated POST /mcp returns 401..."
+          mcp_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 --proto '=https' \
+            -X POST "${URL}/mcp" \
+            -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","method":"tools/list","id":1}') || true
+          if [ "$mcp_code" = "401" ]; then
+            echo "POST /mcp (unauthenticated) -> 401 Unauthorized (PASSED)"
+          else
+            echo "::error::POST /mcp returned HTTP ${mcp_code}, expected 401 Unauthorized"
+            exit 1
+          fi
+
+      - name: Promote candidate (LATEST = 100%)
+        id: promote
+        env:
+          CANDIDATE: ${{ steps.deploy.outputs.revision }}
+        run: |
+          latest=$(gcloud run services describe "$SERVICE" --region "$REGION" --project "$PROJECT_ID" --format='value(status.latestCreatedRevisionName)')
+          if [ "$latest" != "$CANDIDATE" ]; then
+            echo "::error::Latest created revision is '$latest', not candidate '$CANDIDATE'; refusing to route traffic."
+            exit 1
+          fi
+          gcloud run services update-traffic "$SERVICE" --to-latest --region "$REGION" --project "$PROJECT_ID" --quiet
+          gcloud run services describe "$SERVICE" --region "$REGION" --project "$PROJECT_ID" --format=json \
+            | jq -e --arg r "$CANDIDATE" '[.status.traffic[]? | select(.latestRevision == true and .percent == 100 and .revisionName == $r)] | length == 1' >/dev/null \
+            || { echo "::error::Traffic is not LATEST = 100% on $CANDIDATE after update-traffic"; exit 1; }
+          echo "Traffic: LATEST = 100% -> $CANDIDATE"
+
+      - name: Remove candidate tag
+        if: always() && steps.tag.outputs.name != ''
+        env:
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          if gcloud run services describe "$SERVICE" --region "$REGION" --project "$PROJECT_ID" --format=json \
+              | jq -e --arg t "$TAG" '[.spec.traffic[]? | select(.tag == $t)] | length > 0' >/dev/null; then
+            gcloud run services update-traffic "$SERVICE" --remove-tags "$TAG" --region "$REGION" --project "$PROJECT_ID" --quiet
+            echo "Removed tag $TAG"
+          else
+            echo "Tag $TAG not present; nothing to remove"
+          fi
+
+      - name: Job summary
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          CANDIDATE: ${{ steps.deploy.outputs.revision }}
+          PREV: ${{ steps.before.outputs.revision }}
+          PREV_SPLIT: ${{ steps.before.outputs.split }}
+          DEPLOYED: ${{ steps.deploy.outcome }}
+          PROMOTED: ${{ steps.promote.outcome }}
+        run: |
+          now=$(gcloud run services describe "$SERVICE" --region "$REGION" --project "$PROJECT_ID" --format=json 2>/dev/null \
+            | jq -r '[.status.traffic[]? | select((.percent // 0) > 0) | "\(.revisionName)=\(.percent)%\(if .latestRevision then " (LATEST)" else "" end)"] | join(", ")') || now=""
+          {
+            echo "## Spark MCP Gateway Deploy: ${JOB_STATUS}"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Commit | \`${GITHUB_SHA}\` |"
+            echo "| Image digest | \`${DIGEST:-n/a}\` |"
+            echo "| Image | \`${IMAGE_REF:-n/a}\` |"
+            echo "| New revision | \`${CANDIDATE:-none created}\` |"
+            echo "| Previous revision | \`${PREV:-unknown}\` (traffic before deploy: \`${PREV_SPLIT:-unknown}\`) |"
+            echo "| Traffic now | \`${now:-unknown}\` |"
+            echo
+            if [ "$PROMOTED" != "success" ] && { [ "$DEPLOYED" = "success" ] || [ "$DEPLOYED" = "failure" ]; }; then
+              echo "Traffic was **not** moved to candidate. It remains pinned to the previous serving revision."
+              echo
+            fi
+            if [ -n "$PREV_SPLIT" ]; then
+              echo "### Rollback Command"
+              echo '```bash'
+              echo "gcloud run services update-traffic ${SERVICE} --region ${REGION} --project ${PROJECT_ID} --to-revisions ${PREV_SPLIT}"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Authorize &mdash; Spark Unified MCP Gateway v3.0</title>
+  {{template "styles" .}}
+</head>
+<body>
+  <div class="consent-container">
+    <div class="card">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <div class="brand">
+          <div class="brand-logo">S</div>
+          <div>
+            <div class="brand-title">Spark Unified MCP Gateway v3.0</div>
+            <div class="brand-subtitle">OAuth 2.1 Consent Authorization</div>
+          </div>
+        </div>
+        <div class="user-badge">{{.AdminEmail}}</div>
+      </div>
+
+      {{if .IsCustomDCRClient}}
+      <div class="dcr-banner">
+        <div class="dcr-banner-header">
+          <span class="badge badge-warning">Unverified Dynamic Client (RFC 7591)</span>
+        </div>
+        <div class="dcr-banner-text">
+          This application was dynamically registered via RFC 7591 and has not been verified by an administrator. Review granted tool permissions carefully.
+        </div>
+      </div>
+      {{end}}
+
+      <div class="client-summary">
+        <div class="client-summary-row">
+          <span class="client-summary-label">Requesting Client:</span>
+          <span class="client-summary-val" style="color: var(--primary-light); font-weight: 600;">{{.ClientName}}</span>
+        </div>
+        <div class="client-summary-row">
+          <span class="client-summary-label">Client ID:</span>
+          <span class="client-summary-val">{{.ClientID}}</span>
+        </div>
+        <div class="client-summary-row">
+          <span class="client-summary-label">Redirect URI:</span>
+          <span class="client-summary-val">{{.RedirectURI}}</span>
+        </div>
+        {{if .Resource}}
+        <div class="client-summary-row">
+          <span class="client-summary-label">Audience Resource:</span>
+          <span class="client-summary-val">{{.Resource}}</span>
+        </div>
+        {{end}}
+      </div>
+
+      <!-- Inline Upstream Connection Status -->
+      <div style="margin-bottom: 24px;">
+        <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px;">
+          <h3>Upstream Backend Status</h3>
+          <span class="text-muted" style="font-size: 0.8rem;">Required for client tool discovery</span>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;">
+          {{range .Connectors}}
+          <div style="background-color: #0b111e; border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 12px; display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <div style="font-weight: 600; font-size: 0.9rem;">{{.Name}}</div>
+              <div class="text-muted" style="font-size: 0.78rem;">{{if .KeylessADC}}Google ADC{{else}}{{.AccountLabel}}{{end}}</div>
+            </div>
+            <div>
+              {{if .KeylessADC}}
+                <span class="badge badge-adc">Active (Keyless ADC)</span>
+              {{else}}
+                {{if .Connected}}
+                  <span class="badge badge-connected">Connected</span>
+                {{else}}
+                  <button type="button" class="btn btn-sm btn-outline" onclick="openAuthorizePopup('{{.ID}}')">Connect</button>
+                {{end}}
+              {{end}}
+            </div>
+          </div>
+          {{end}}
+        </div>
+      </div>
+
+      <form method="POST" action="/authorize">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="client_id" value="{{.ClientID}}">
+        <input type="hidden" name="redirect_uri" value="{{.RedirectURI}}">
+        <input type="hidden" name="state" value="{{.State}}">
+        <input type="hidden" name="code_challenge" value="{{.CodeChallenge}}">
+        <input type="hidden" name="code_challenge_method" value="{{.CodeChallengeMeth}}">
+        <input type="hidden" name="resource" value="{{.Resource}}">
+
+        <h3 style="margin-bottom: 12px;">Scope Preset</h3>
+        <div class="preset-grid">
+          <label class="preset-card">
+            <input type="radio" name="preset" value="minimal" id="preset-minimal" onchange="onPresetChange(this)"
+              {{if eq .DefaultPreset "minimal"}}checked{{end}}>
+            <div class="preset-info">
+              <span class="preset-title">Minimal</span>
+              <span class="preset-desc">Core Discovery Only &mdash; Cloud Run &amp; Developer Knowledge</span>
+            </div>
+          </label>
+
+          <label class="preset-card">
+            <input type="radio" name="preset" value="read_only" id="preset-read_only" onchange="onPresetChange(this)"
+              {{if or (eq .DefaultPreset "read_only") (not .DefaultPreset)}}checked{{end}}>
+            <div class="preset-info">
+              <span class="preset-title">Read Only (Recommended)</span>
+              <span class="preset-desc">Read Only (Recommended &mdash; Strips all mutating/write tools)</span>
+            </div>
+          </label>
+
+          <label class="preset-card">
+            <input type="radio" name="preset" value="full_access" id="preset-full_access" onchange="onPresetChange(this)"
+              {{if eq .DefaultPreset "full_access"}}checked{{end}}>
+            <div class="preset-info">
+              <span class="preset-title">Full Access</span>
+              <span class="preset-desc">Full Access (Enables GitHub Issue Creation &amp; Jira Status Transitions)</span>
+            </div>
+          </label>
+
+          <label class="preset-card">
+            <input type="radio" name="preset" value="custom" id="preset-custom" onchange="onPresetChange(this)"
+              {{if eq .DefaultPreset "custom"}}checked{{end}}>
+            <div class="preset-info">
+              <span class="preset-title">Custom</span>
+              <span class="preset-desc">Custom Per-Connector Scopes</span>
+            </div>
+          </label>
+        </div>
+
+        <h3 style="margin-bottom: 12px;">Per-Connector Scope Configuration</h3>
+        <div class="scope-pills-grid">
+          <div class="scope-pill-item">
+            <span class="scope-pill-label">GitHub</span>
+            <select id="scope_github" name="scope_github" class="form-select" onchange="onScopeChange()">
+              <option value="read_only">read_only</option>
+              <option value="full_access">full_access</option>
+              <option value="none">none</option>
+            </select>
+          </div>
+
+          <div class="scope-pill-item">
+            <span class="scope-pill-label">Atlassian Jira</span>
+            <select id="scope_jira" name="scope_jira" class="form-select" onchange="onScopeChange()">
+              <option value="read_only">read_only</option>
+              <option value="full_access">full_access</option>
+              <option value="none">none</option>
+            </select>
+          </div>
+
+          <div class="scope-pill-item">
+            <span class="scope-pill-label">Google Cloud Run (GCP)</span>
+            <select id="scope_gcp" name="scope_gcp" class="form-select" onchange="onScopeChange()">
+              <option value="read_only">read_only</option>
+              <option value="none">none</option>
+            </select>
+          </div>
+
+          <div class="scope-pill-item">
+            <span class="scope-pill-label">Google Dev Knowledge (GDK)</span>
+            <select id="scope_gdk" name="scope_gdk" class="form-select" onchange="onScopeChange()">
+              <option value="read_only">read_only</option>
+              <option value="none">none</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="consent-actions">
+          <button type="submit" name="decision" value="deny" class="btn btn-outline btn-lg">Deny</button>
+          <button type="submit" name="decision" value="approve" class="btn btn-primary btn-lg">Authorize Application</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    function syncScopesFromPreset(preset) {
+      var github = document.getElementById('scope_github');
+      var jira = document.getElementById('scope_jira');
+      var gcp = document.getElementById('scope_gcp');
+      var gdk = document.getElementById('scope_gdk');
+
+      if (preset === 'minimal') {
+        if (github) github.value = 'none';
+        if (jira) jira.value = 'none';
+        if (gcp) gcp.value = 'read_only';
+        if (gdk) gdk.value = 'read_only';
+      } else if (preset === 'read_only') {
+        if (github) github.value = 'read_only';
+        if (jira) jira.value = 'read_only';
+        if (gcp) gcp.value = 'read_only';
+        if (gdk) gdk.value = 'read_only';
+      } else if (preset === 'full_access') {
+        if (github) github.value = 'full_access';
+        if (jira) jira.value = 'full_access';
+        if (gcp) gcp.value = 'read_only';
+        if (gdk) gdk.value = 'read_only';
+      }
+    }
+
+    function onPresetChange(radio) {
+      if (radio.checked && radio.value !== 'custom') {
+        syncScopesFromPreset(radio.value);
+      }
+    }
+
+    function onScopeChange() {
+      var customRadio = document.getElementById('preset-custom');
+      if (customRadio) {
+        customRadio.checked = true;
+      }
+    }
+
+    function openAuthorizePopup(id) {
+      var sel = document.getElementById('scope_' + id);
+      var mode = (sel && sel.value !== 'none') ? sel.value : 'read_only';
+      window.open('/oauth/connect/' + encodeURIComponent(id) + '?mode=' + encodeURIComponent(mode), 'spark_oauth_popup', 'width=620,height=720');
+    }
+
+    window.addEventListener('message', function(event) {
+      if (event.origin !== window.location.origin) return;
+      if (event.data && event.data.type === 'spark-mcp-connected') {
+        window.location.reload();
+      }
+    });
+
+    // Run on initial load
+    (function() {
+      var checkedPreset = document.querySelector('input[name="preset"]:checked');
+      if (checkedPreset && checkedPreset.value !== 'custom') {
+        syncScopesFromPreset(checkedPreset.value);
+      }
+    })();
+  </script>
+</body>
+</html>
