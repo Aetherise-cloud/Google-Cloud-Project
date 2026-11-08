@@ -67,10 +67,12 @@ func (s *OAuthServer) SessionManager() *SessionManager {
 // RegisterRoutes registers OAuth and Auth routes onto an http.ServeMux.
 func (s *OAuthServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", s.handleProtectedResource)
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", s.handleProtectedResource)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleAuthorizationServerMetadata)
 	mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
 
 	mux.HandleFunc("POST /api/oauth/register", s.handleRegisterClient)
+	mux.HandleFunc("POST /api/oauth/clients/static", s.handleCreateStaticClient)
 	mux.HandleFunc("GET /authorize", s.handleAuthorizeGet)
 	mux.HandleFunc("POST /authorize", s.handleAuthorizePost)
 	mux.HandleFunc("POST /api/oauth/token", s.handleToken)
@@ -82,7 +84,7 @@ func (s *OAuthServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /auth/logout", s.handleLogout)
 }
 
-// RFC 9728
+// RFC 9728 (including §3.1 path-appended resource discovery)
 func (s *OAuthServer) handleProtectedResource(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -106,7 +108,8 @@ func (s *OAuthServer) handleAuthorizationServerMetadata(w http.ResponseWriter, r
 		"response_types_supported":              []string{"code"},
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
-		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_post"},
+		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_post", "client_secret_basic"},
+		"scopes_supported":                      []string{"mcp", "read_only", "full_access"},
 	})
 }
 
@@ -125,8 +128,12 @@ func (s *OAuthServer) handleRegisterClient(w http.ResponseWriter, r *http.Reques
 	}
 
 	var req struct {
-		ClientName   string   `json:"client_name"`
-		RedirectURIs []string `json:"redirect_uris"`
+		ClientName              string   `json:"client_name"`
+		RedirectURIs            []string `json:"redirect_uris"`
+		TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
+		GrantTypes              []string `json:"grant_types"`
+		ResponseTypes           []string `json:"response_types"`
+		Scope                   string   `json:"scope"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 32*1024)).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid_request","error_description":"Invalid JSON payload"}`, http.StatusBadRequest)
@@ -135,6 +142,11 @@ func (s *OAuthServer) handleRegisterClient(w http.ResponseWriter, r *http.Reques
 
 	if len(req.RedirectURIs) == 0 {
 		http.Error(w, `{"error":"invalid_redirect_uri","error_description":"At least one redirect_uri is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	if len(req.RedirectURIs) > 25 {
+		http.Error(w, `{"error":"invalid_redirect_uri","error_description":"Too many redirect_uris (max 25)"}`, http.StatusBadRequest)
 		return
 	}
 
@@ -153,20 +165,29 @@ func (s *OAuthServer) handleRegisterClient(w http.ResponseWriter, r *http.Reques
 		cleanName = "Spark MCP Client"
 	}
 
+	authMethod := strings.TrimSpace(req.TokenEndpointAuthMethod)
+	if authMethod == "" {
+		authMethod = "client_secret_post"
+	}
+
 	// Generate client credentials with checked entropy
 	clientIDBytes := make([]byte, 16)
-	clientSecretBytes := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, clientIDBytes); err != nil {
 		http.Error(w, `{"error":"server_error","error_description":"failed generating client id"}`, http.StatusInternalServerError)
 		return
 	}
-	if _, err := io.ReadFull(rand.Reader, clientSecretBytes); err != nil {
-		http.Error(w, `{"error":"server_error","error_description":"failed generating client secret"}`, http.StatusInternalServerError)
-		return
+
+	clientSecret := ""
+	if authMethod != "none" {
+		clientSecretBytes := make([]byte, 32)
+		if _, err := io.ReadFull(rand.Reader, clientSecretBytes); err != nil {
+			http.Error(w, `{"error":"server_error","error_description":"failed generating client secret"}`, http.StatusInternalServerError)
+			return
+		}
+		clientSecret = hex.EncodeToString(clientSecretBytes)
 	}
 
 	clientID := fmt.Sprintf("spark-client-%x", clientIDBytes)
-	clientSecret := hex.EncodeToString(clientSecretBytes)
 
 	client := &store.OAuthClient{
 		ClientID:     clientID,
@@ -186,19 +207,141 @@ func (s *OAuthServer) handleRegisterClient(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	resp := map[string]interface{}{
+		"client_id":                  client.ClientID,
+		"client_id_issued_at":        client.CreatedAt.Unix(),
+		"client_name":                client.ClientName,
+		"redirect_uris":              client.RedirectURIs,
+		"grant_types":                []string{"authorization_code", "refresh_token"},
+		"response_types":             []string{"code"},
+		"token_endpoint_auth_method": authMethod,
+		"token_endpoint_auth_mode":   authMethod,
+		"expires_at":                 client.ExpiresAt.Unix(),
+	}
+	if client.ClientSecret != "" {
+		resp["client_secret"] = client.ClientSecret
+		resp["client_secret_expires_at"] = 0
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// POST /api/oauth/clients/static (Pre-populates Google/Gemini redirect URIs with prefix-matching support)
+func (s *OAuthServer) handleCreateStaticClient(w http.ResponseWriter, r *http.Request) {
+	adminEmail, err := s.session.GetAdminSession(r)
+	if err != nil {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		ClientName   string   `json:"client_name"`
+		RedirectURIs []string `json:"redirect_uris"`
+		CSRFToken    string   `json:"csrf_token"`
+	}
+	_ = json.NewDecoder(io.LimitReader(r.Body, 32*1024)).Decode(&req)
+
+	csrfToken := req.CSRFToken
+	if csrfToken == "" {
+		csrfToken = r.Header.Get("X-CSRF-Token")
+	}
+	if !s.session.ValidateCSRFToken(csrfToken, adminEmail) {
+		http.Error(w, `{"error":"invalid_csrf","error_description":"invalid or missing CSRF token"}`, http.StatusForbidden)
+		return
+	}
+
+	cleanName := controlCharRegex.ReplaceAllString(req.ClientName, "")
+	cleanName = strings.TrimSpace(cleanName)
+	if cleanName == "" {
+		cleanName = "Gemini Spark Static Client"
+	}
+
+	defaults := []string{
+		"https://oauth-redirect.googleusercontent.com/r/",
+		"https://oauth-redirect.googleusercontent.com/a/",
+		"https://oauth-redirect-sandbox.googleusercontent.com/r/",
+		"https://gemini.google.com/oauth-redirect",
+		"https://vertexaisearch.cloud.google.com/oauth-redirect",
+	}
+	seen := make(map[string]bool)
+	var allURIs []string
+	for _, u := range defaults {
+		seen[u] = true
+		allURIs = append(allURIs, u)
+	}
+	for _, u := range req.RedirectURIs {
+		u = strings.TrimSpace(u)
+		if u != "" && !seen[u] && s.isValidRedirectURI(u) {
+			seen[u] = true
+			allURIs = append(allURIs, u)
+		}
+	}
+
+	clientIDBytes := make([]byte, 16)
+	clientSecretBytes := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, clientIDBytes); err != nil {
+		http.Error(w, `{"error":"server_error"}`, http.StatusInternalServerError)
+		return
+	}
+	if _, err := io.ReadFull(rand.Reader, clientSecretBytes); err != nil {
+		http.Error(w, `{"error":"server_error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	clientID := fmt.Sprintf("spark-static-client-%x", clientIDBytes)
+	clientSecret := hex.EncodeToString(clientSecretBytes)
+
+	client := &store.OAuthClient{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		ClientName:   cleanName,
+		RedirectURIs: allURIs,
+		CreatedAt:    time.Now(),
+		ExpiresAt:    time.Now().Add(365 * 24 * time.Hour), // 1 year
+	}
+
+	if err := s.store.SaveOAuthClient(r.Context(), client); err != nil {
+		http.Error(w, `{"error":"server_error"}`, http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"client_id":                client.ClientID,
-		"client_secret":            client.ClientSecret,
-		"client_name":              client.ClientName,
-		"redirect_uris":            client.RedirectURIs,
-		"token_endpoint_auth_mode": "none",
-		"expires_at":               client.ExpiresAt.Unix(),
+		"client_id":                  client.ClientID,
+		"client_secret":              client.ClientSecret,
+		"client_name":                client.ClientName,
+		"redirect_uris":              client.RedirectURIs,
+		"token_endpoint_auth_method": "client_secret_post",
+		"token_endpoint_auth_mode":   "client_secret_post",
+		"expires_at":                 client.ExpiresAt.Unix(),
 	})
 }
 
-// isValidRedirectURI enforces strict OAuth 2.1 URI validation (P1-3).
+// matchesClientRedirectURI supports exact matching and static-client trailing-slash prefix matching.
+func (s *OAuthServer) matchesClientRedirectURI(client *store.OAuthClient, redirectURI string) bool {
+	if client == nil || redirectURI == "" {
+		return false
+	}
+	for _, u := range client.RedirectURIs {
+		if u == redirectURI {
+			return true
+		}
+	}
+	// Static client prefix matching (e.g. https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-...)
+	if strings.HasPrefix(client.ClientID, "spark-static-client-") && s.isValidRedirectURI(redirectURI) {
+		for _, entry := range client.RedirectURIs {
+			if strings.HasSuffix(entry, "/") && strings.HasPrefix(redirectURI, entry) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isValidRedirectURI enforces strict OAuth 2.1 URI validation (pinned exact Google OpenAuth hosts — no wildcard user-content buckets).
 func (s *OAuthServer) isValidRedirectURI(rawURI string) bool {
 	rawURI = strings.TrimSpace(rawURI)
 	if rawURI == "" {
@@ -237,10 +380,14 @@ func (s *OAuthServer) isValidRedirectURI(rawURI string) bool {
 		return false
 	}
 
+	// Pin exact Google OpenAuth hostnames (never wildcard *.googleusercontent.com or *.googleapis.com)
 	host := strings.ToLower(u.Hostname())
-	if host == "gemini.google.com" ||
+	if host == "oauth-redirect.googleusercontent.com" ||
+		host == "oauth-redirect-sandbox.googleusercontent.com" ||
 		host == "aisandbox-pa.googleapis.com" ||
-		strings.HasSuffix(host, ".google.com") {
+		host == "google.com" || strings.HasSuffix(host, ".google.com") ||
+		host == "claude.ai" || strings.HasSuffix(host, ".claude.ai") || strings.HasSuffix(host, ".anthropic.com") ||
+		host == "chatgpt.com" || strings.HasSuffix(host, ".openai.com") {
 		return true
 	}
 
@@ -298,10 +445,6 @@ func (s *OAuthServer) handleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid_request: response_type must be 'code'", http.StatusBadRequest)
 		return
 	}
-	if codeChallenge == "" || codeChallengeMeth != "S256" {
-		http.Error(w, "invalid_request: PKCE code_challenge and code_challenge_method=S256 required", http.StatusBadRequest)
-		return
-	}
 
 	client, err := s.store.GetOAuthClient(r.Context(), clientID)
 	if err != nil {
@@ -309,16 +452,23 @@ func (s *OAuthServer) handleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	matchedURI := false
-	for _, u := range client.RedirectURIs {
-		if u == redirectURI {
-			matchedURI = true
-			break
-		}
-	}
-	if !matchedURI {
+	if !s.matchesClientRedirectURI(client, redirectURI) {
 		http.Error(w, "invalid_redirect_uri: redirect_uri does not match client registration", http.StatusBadRequest)
 		return
+	}
+
+	// PKCE or confidential client check
+	if codeChallenge != "" {
+		if codeChallengeMeth != "S256" {
+			http.Error(w, "invalid_request: PKCE code_challenge and code_challenge_method=S256 required", http.StatusBadRequest)
+			return
+		}
+	} else {
+		// Confidential client without PKCE
+		if client.ClientSecret == "" {
+			http.Error(w, "invalid_request: PKCE code_challenge required for public clients", http.StatusBadRequest)
+			return
+		}
 	}
 
 	csrfToken := s.session.GenerateCSRFToken(adminEmail)
@@ -327,6 +477,28 @@ func (s *OAuthServer) handleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 		{ID: "jira", Name: "Atlassian Jira", Description: "Issue inspection and status transitions", ScopeMode: "read_only"},
 		{ID: "gcp", Name: "Google Cloud Run", Description: "Cloud Run inspection via keyless ADC", KeylessADC: true, Connected: true, ScopeMode: "read_only"},
 		{ID: "gdk", Name: "Google Developer Knowledge", Description: "Developer Knowledge documentation search via keyless ADC", KeylessADC: true, Connected: true, ScopeMode: "read_only"},
+	}
+
+	// Also load custom connectors and connection state for consent page
+	if conns, err := s.store.ListConnections(r.Context(), adminEmail); err == nil {
+		for _, conn := range conns {
+			if conn.Provider == "github" {
+				connectors[0].Connected = true
+			} else if conn.Provider == "jira" {
+				connectors[1].Connected = true
+			} else if strings.HasPrefix(conn.Provider, "custom:") {
+				slug := strings.TrimPrefix(conn.Provider, "custom:")
+				connectors = append(connectors, ui.ConnectorView{
+					ID:            conn.Provider,
+					Name:          "Custom: " + slug,
+					Description:   "Custom federated connector",
+					Connected:     true,
+					IsCustom:      true,
+					ConnectorType: "remote_mcp",
+					ScopeMode:     "read_only",
+				})
+			}
+		}
 	}
 
 	pageData := ui.AuthorizePageData{
@@ -340,7 +512,7 @@ func (s *OAuthServer) handleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 		CodeChallengeMeth: codeChallengeMeth,
 		Resource:          resource,
 		CSRFToken:         csrfToken,
-		IsCustomDCRClient: strings.HasPrefix(clientID, "spark-client-"),
+		IsCustomDCRClient: strings.HasPrefix(clientID, "spark-client-") || strings.HasPrefix(clientID, "spark-static-client-"),
 		DefaultPreset:     "read_only",
 		Connectors:        connectors,
 	}
@@ -382,16 +554,22 @@ func (s *OAuthServer) handleAuthorizePost(w http.ResponseWriter, r *http.Request
 		http.Error(w, "unauthorized_client", http.StatusBadRequest)
 		return
 	}
-	matched := false
-	for _, u := range client.RedirectURIs {
-		if u == redirectURI {
-			matched = true
-			break
-		}
-	}
-	if !matched {
+	if !s.matchesClientRedirectURI(client, redirectURI) {
 		http.Error(w, "invalid_redirect_uri", http.StatusBadRequest)
 		return
+	}
+
+	// Validate PKCE / Confidential
+	if codeChallenge != "" {
+		if codeChallengeMeth != "S256" {
+			http.Error(w, "invalid_request: code_challenge_method must be S256", http.StatusBadRequest)
+			return
+		}
+	} else {
+		if client.ClientSecret == "" {
+			http.Error(w, "invalid_request: PKCE code_challenge required for public clients", http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Handle Deny
@@ -425,6 +603,37 @@ func (s *OAuthServer) handleAuthorizePost(w http.ResponseWriter, r *http.Request
 		scopes["jira"] = "read_only"
 		scopes["gcp"] = "read_only"
 		scopes["gdk"] = "read_only"
+	}
+
+	// Also handle custom connectors
+	if conns, err := s.store.ListConnections(r.Context(), adminEmail); err == nil {
+		for _, conn := range conns {
+			if strings.HasPrefix(conn.Provider, "custom:") {
+				switch preset {
+				case "minimal":
+					scopes[conn.Provider] = "none"
+				case "full_access":
+					scopes[conn.Provider] = "full_access"
+				case "custom":
+					val := r.FormValue("scope_" + conn.Provider)
+					if val == "" {
+						val = r.FormValue("scope_" + strings.ReplaceAll(conn.Provider, ":", "_"))
+					}
+					if val == "" {
+						val = "read_only"
+					}
+					scopes[conn.Provider] = val
+				default:
+					scopes[conn.Provider] = "read_only"
+				}
+			}
+		}
+	}
+	for k, v := range r.Form {
+		if strings.HasPrefix(k, "scope_custom:") && len(v) > 0 {
+			prov := strings.TrimPrefix(k, "scope_")
+			scopes[prov] = v[0]
+		}
 	}
 
 	// Generate 32-byte authorization code with checked entropy
@@ -480,20 +689,34 @@ func (s *OAuthServer) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleTokenAuthCode implements RFC 6749 §4.1.3 & OAuth 2.1 token issuance (P0-2).
+// handleTokenAuthCode implements RFC 6749 §4.1.3 & OAuth 2.1 token issuance.
 func (s *OAuthServer) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	codeStr := strings.TrimSpace(r.FormValue("code"))
 	verifier := strings.TrimSpace(r.FormValue("code_verifier"))
 	clientID := strings.TrimSpace(r.FormValue("client_id"))
+	clientSecret := strings.TrimSpace(r.FormValue("client_secret"))
 	redirectURI := strings.TrimSpace(r.FormValue("redirect_uri"))
 	reqResource := strings.TrimSpace(r.FormValue("resource"))
 
-	if codeStr == "" || verifier == "" {
+	// Support client_secret_basic (RFC 6749 §2.3.1)
+	if u, p, ok := r.BasicAuth(); ok {
+		if unquotedUser, err := url.QueryUnescape(u); err == nil && unquotedUser != "" {
+			clientID = unquotedUser
+		} else if u != "" {
+			clientID = u
+		}
+		if unquotedPass, err := url.QueryUnescape(p); err == nil && unquotedPass != "" {
+			clientSecret = unquotedPass
+		} else if p != "" {
+			clientSecret = p
+		}
+	}
+
+	if codeStr == "" {
 		http.Error(w, `{"error":"invalid_request","error_description":"code and code_verifier required"}`, http.StatusBadRequest)
 		return
 	}
 
-	// RFC 6749 §4.1.3 & OAuth 2.1: client_id and redirect_uri are mandatory on token endpoint
 	if clientID == "" {
 		http.Error(w, `{"error":"invalid_grant","error_description":"client_id mismatch or missing"}`, http.StatusBadRequest)
 		return
@@ -519,10 +742,30 @@ func (s *OAuthServer) handleTokenAuthCode(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Verify PKCE S256 with constant-time comparison
-	if !VerifyPKCES256(verifier, authCode.CodeChallenge) {
-		http.Error(w, `{"error":"invalid_grant","error_description":"PKCE verification failed"}`, http.StatusBadRequest)
+	client, err := s.store.GetOAuthClient(r.Context(), authCode.ClientID)
+	if err != nil {
+		http.Error(w, `{"error":"invalid_client","error_description":"client not found"}`, http.StatusUnauthorized)
 		return
+	}
+
+	// Verify PKCE S256 or confidential client credentials
+	if authCode.CodeChallenge != "" {
+		if verifier == "" || !VerifyPKCES256(verifier, authCode.CodeChallenge) {
+			http.Error(w, `{"error":"invalid_grant","error_description":"PKCE verification failed"}`, http.StatusBadRequest)
+			return
+		}
+		if clientSecret != "" {
+			if client.ClientSecret == "" || subtle.ConstantTimeCompare([]byte(clientSecret), []byte(client.ClientSecret)) != 1 {
+				http.Error(w, `{"error":"invalid_client","error_description":"client secret verification failed"}`, http.StatusUnauthorized)
+				return
+			}
+		}
+	} else {
+		// Confidential client flow: require client_secret
+		if clientSecret == "" || client.ClientSecret == "" || subtle.ConstantTimeCompare([]byte(clientSecret), []byte(client.ClientSecret)) != 1 {
+			http.Error(w, `{"error":"invalid_client","error_description":"client secret verification failed"}`, http.StatusUnauthorized)
+			return
+		}
 	}
 
 	// Verify RFC 8707 Resource binding if provided
@@ -602,11 +845,44 @@ func (s *OAuthServer) handleTokenRefreshToken(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	clientID := strings.TrimSpace(r.FormValue("client_id"))
+	clientSecret := strings.TrimSpace(r.FormValue("client_secret"))
+	if u, p, ok := r.BasicAuth(); ok {
+		if unquotedUser, err := url.QueryUnescape(u); err == nil && unquotedUser != "" {
+			clientID = unquotedUser
+		} else if u != "" {
+			clientID = u
+		}
+		if unquotedPass, err := url.QueryUnescape(p); err == nil && unquotedPass != "" {
+			clientSecret = unquotedPass
+		} else if p != "" {
+			clientSecret = p
+		}
+	}
+
 	rtHash := sha256Hex(rtPlain)
 	rec, err := s.store.GetRefreshToken(r.Context(), rtHash)
 	if err != nil {
 		http.Error(w, `{"error":"invalid_grant","error_description":"invalid refresh token"}`, http.StatusBadRequest)
 		return
+	}
+
+	// Validate client binding and confidential credentials
+	if rec.ClientID != "" {
+		if clientID != "" && rec.ClientID != clientID {
+			http.Error(w, `{"error":"invalid_grant","error_description":"client_id mismatch"}`, http.StatusBadRequest)
+			return
+		}
+		client, err := s.store.GetOAuthClient(r.Context(), rec.ClientID)
+		if err == nil && client != nil && client.ClientSecret != "" {
+			// Enforce secret on static confidential clients or whenever credentials are supplied
+			if strings.HasPrefix(client.ClientID, "spark-static-client-") || clientSecret != "" {
+				if subtle.ConstantTimeCompare([]byte(clientSecret), []byte(client.ClientSecret)) != 1 {
+					http.Error(w, `{"error":"invalid_client","error_description":"client secret verification failed"}`, http.StatusUnauthorized)
+					return
+				}
+			}
+		}
 	}
 
 	// Token-Family Replay Revocation!
@@ -677,7 +953,6 @@ func (s *OAuthServer) handleTokenRefreshToken(w http.ResponseWriter, r *http.Req
 
 // GET /auth/login
 func (s *OAuthServer) handleLogin(w http.ResponseWriter, r *http.Request) {
-	// If already authenticated, redirect to return_to or dashboard
 	if _, err := s.session.GetAdminSession(r); err == nil {
 		returnTo := sanitizeReturnTo(r.URL.Query().Get("return_to"))
 		http.Redirect(w, r, returnTo, http.StatusFound)
@@ -704,7 +979,6 @@ func (s *OAuthServer) oidcStateCookieName() string {
 func (s *OAuthServer) handleGoogleLogin(w http.ResponseWriter, r *http.Request) {
 	safeReturnTo := sanitizeReturnTo(r.URL.Query().Get("return_to"))
 
-	// 1. Generate 32-byte cryptographically random nonce
 	nonceBytes := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, nonceBytes); err != nil {
 		http.Error(w, "internal server error: entropy read failed", http.StatusInternalServerError)
@@ -712,14 +986,12 @@ func (s *OAuthServer) handleGoogleLogin(w http.ResponseWriter, r *http.Request) 
 	}
 	nonce := hex.EncodeToString(nonceBytes)
 
-	// 2. Build signed state: nonce | expUnix | base64(safeReturnTo)
 	expUnix := time.Now().Add(10 * time.Minute).Unix()
 	encodedReturnTo := base64.RawURLEncoding.EncodeToString([]byte(safeReturnTo))
 	payload := fmt.Sprintf("%s|%d|%s", nonce, expUnix, encodedReturnTo)
 	sig := s.session.sign("oidc_state:" + payload)
 	signedState := payload + "." + sig
 
-	// 3. Set short-lived OIDC state cookie containing nonce
 	isSecure := strings.HasPrefix(strings.ToLower(s.cfg.ServiceURL), "https://")
 	http.SetCookie(w, &http.Cookie{
 		Name:     s.oidcStateCookieName(),
@@ -741,12 +1013,11 @@ func (s *OAuthServer) handleGoogleLogin(w http.ResponseWriter, r *http.Request) 
 	http.Redirect(w, r, u, http.StatusFound)
 }
 
-// GET /auth/google/callback (P0-1 & P2-2: RS256 Verification & Nonce Validation)
+// GET /auth/google/callback
 func (s *OAuthServer) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	cookieName := s.oidcStateCookieName()
 	oidcCookie, err := r.Cookie(cookieName)
 
-	// Immediately clear the state cookie
 	isSecure := strings.HasPrefix(strings.ToLower(s.cfg.ServiceURL), "https://")
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
@@ -809,7 +1080,6 @@ func (s *OAuthServer) handleGoogleCallback(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Exchange code for Google tokens
 	redirectURI := s.cfg.ServiceURL + "/auth/google/callback"
 	data := url.Values{
 		"code":          {code},
@@ -834,25 +1104,22 @@ func (s *OAuthServer) handleGoogleCallback(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// RS256 cryptographic verification of Google ID token
 	email, err := s.GoogleVerifier.VerifyIDToken(r.Context(), tokenRes.IDToken, s.cfg.GoogleOIDCClientID)
 	if err != nil {
 		http.Redirect(w, r, "/auth/login?error=invalid_id_token", http.StatusFound)
 		return
 	}
 
-	// Strict case-insensitive check in ADMIN_ALLOWED_EMAILS
 	if !s.cfg.IsAdminAllowed(email) {
 		http.Redirect(w, r, "/auth/login?error=unauthorized_email", http.StatusFound)
 		return
 	}
 
-	// Issue admin session
 	s.session.SetAdminSession(w, email)
 	http.Redirect(w, r, returnTo, http.StatusFound)
 }
 
-// POST /auth/dev/login (QA-1: Requires email, validates allowlist, sanitizes return_to)
+// POST /auth/dev/login
 func (s *OAuthServer) handleDevLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.cfg.DevMode {
 		http.Error(w, "Forbidden: Dev sign-in is disabled in production", http.StatusForbidden)

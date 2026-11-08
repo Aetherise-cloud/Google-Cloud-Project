@@ -263,6 +263,20 @@ func (r *Registry) handleGitHubReadFile(ctx context.Context, args map[string]int
 	return string(body), nil
 }
 
+func isDynamicRepoAllowed(allowedCSV, owner, repo string) bool {
+	if strings.TrimSpace(allowedCSV) == "" {
+		return false
+	}
+	target := strings.ToLower(owner + "/" + repo)
+	for _, entry := range strings.Split(allowedCSV, ",") {
+		entry = strings.TrimSpace(strings.ToLower(entry))
+		if entry == "*" || entry == target {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Registry) handleGitHubCreateIssue(ctx context.Context, args map[string]interface{}, token *vault.TokenData) (string, error) {
 	if token == nil || token.AccessToken == "" {
 		return "", errors.New("github connection required: please connect GitHub on gateway dashboard")
@@ -275,8 +289,8 @@ func (r *Registry) handleGitHubCreateIssue(ctx context.Context, args map[string]
 		return "", errors.New("missing required arguments: owner, repo, and title")
 	}
 
-	// Security Policy Check: GITHUB_ALLOWED_WRITE_REPOS allowlist
-	if !r.cfg.IsRepoAllowedForWrite(owner, repo) {
+	// Security Policy Check: GITHUB_ALLOWED_WRITE_REPOS allowlist (env or KMS-configured)
+	if !r.cfg.IsRepoAllowedForWrite(owner, repo) && !isDynamicRepoAllowed(token.AllowedWriteRepos, owner, repo) {
 		return "", fmt.Errorf("repository %s/%s is not in GITHUB_ALLOWED_WRITE_REPOS allowlist", owner, repo)
 	}
 
