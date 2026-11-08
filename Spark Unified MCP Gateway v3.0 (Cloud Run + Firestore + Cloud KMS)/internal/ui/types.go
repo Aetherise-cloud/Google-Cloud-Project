@@ -4,14 +4,20 @@ import "net/http"
 
 // ConnectorView represents the view model for a third-party or keyless connector.
 type ConnectorView struct {
-	ID           string // "github", "jira", "gcp", "gdk"
-	Name         string // "GitHub", "Atlassian Jira", "Google Cloud Run", "Google Developer Knowledge"
-	Description  string
-	Connected    bool
-	KeylessADC   bool   // true for "gcp" and "gdk" (always active, no Connect/Disconnect buttons)
-	ScopeMode    string // "read_only", "full_access", or "minimal"
-	AccountLabel string // e.g. "octocat", "team.atlassian.net", "spark-mcp-gateway-v3 (Keyless ADC)"
-	UpdatedAt    string
+	ID            string // "github", "jira", "gcp", "gdk", or "custom:<slug>"
+	Name          string // Display name
+	Description   string
+	Connected     bool
+	KeylessADC    bool   // true for "gcp" and "gdk"
+	IsCustom      bool   // true for user-added connectors ("custom:<slug>")
+	ConnectorType string // "oauth2", "keyless_adc", "remote_mcp", "rest_api", "pat"
+	NeedsConfig   bool   // true when OAuth 2.0 Client ID/Secret is not configured yet
+	OAuthConfigOK bool   // true when OAuth 2.0 Client ID/Secret is configured (env or KMS)
+	EndpointURL   string // Upstream MCP or REST API base URL for custom connectors
+	ScopeMode     string // "read_only", "full_access", or "minimal"
+	AccountLabel  string
+	UpdatedAt     string
+	TemplateID    string // "github", "jira", "slack", "notion", "linear", "cloudflare", "sentry", "supabase", "custom_mcp", "custom_api"
 }
 
 // LoginPageData holds data passed to RenderLogin.
