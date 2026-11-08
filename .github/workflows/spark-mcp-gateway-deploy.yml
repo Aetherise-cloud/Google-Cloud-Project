@@ -77,11 +77,23 @@ jobs:
       - name: Record the revision currently serving traffic
         id: before
         run: |
-          gcloud run services describe "$SERVICE" --region "$REGION" --project "$PROJECT_ID" --format=json > "$RUNNER_TEMP/before.json"
-          prev=$(jq -r '[.status.traffic[]? | select((.percent // 0) > 0)] | max_by(.percent) | .revisionName // empty' "$RUNNER_TEMP/before.json")
-          split=$(jq -r '[.status.traffic[]? | select((.percent // 0) > 0) | "\(.revisionName)=\(.percent)"] | join(",")' "$RUNNER_TEMP/before.json")
-          if [ -z "$prev" ] || [ -z "$split" ]; then
-            echo "::error::Could not determine the revision currently serving traffic; refusing to deploy without a rollback target."
+          echo "Resolving currently serving revision for $SERVICE (polling up to 5m for initial Terraform bootstrap)..."
+          found=0
+          for i in $(seq 1 30); do
+            if gcloud run services describe "$SERVICE" --region "$REGION" --project "$PROJECT_ID" --format=json > "$RUNNER_TEMP/before.json" 2>/dev/null; then
+              prev=$(jq -r '[.status.traffic[]? | select((.percent // 0) > 0)] | max_by(.percent) | .revisionName // empty' "$RUNNER_TEMP/before.json")
+              split=$(jq -r '[.status.traffic[]? | select((.percent // 0) > 0) | "\(.revisionName)=\(.percent)"] | join(",")' "$RUNNER_TEMP/before.json")
+              if [ -n "$prev" ] && [ -n "$split" ]; then
+                found=1
+                break
+              fi
+            fi
+            echo "Attempt $i/30: Service not ready or no active traffic split yet. Waiting 10s for Terraform apply..."
+            sleep 10
+          done
+
+          if [ "$found" -ne 1 ]; then
+            echo "::error::Could not determine the revision currently serving traffic after 5 minutes; refusing to deploy without a rollback target."
             exit 1
           fi
           echo "Serving before deploy: $split"
