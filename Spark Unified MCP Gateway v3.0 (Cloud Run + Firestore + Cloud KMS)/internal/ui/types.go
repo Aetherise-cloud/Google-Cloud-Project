@@ -10,7 +10,7 @@ type ConnectorView struct {
 	Connected    bool
 	KeylessADC   bool   // true for "gcp" and "gdk" (always active, no Connect/Disconnect buttons)
 	ScopeMode    string // "read_only", "full_access", or "minimal"
-	AccountLabel string // e.g. "octocat", "team.atlassian.net", "group-511516 (Keyless ADC)"
+	AccountLabel string // e.g. "octocat", "team.atlassian.net", "spark-mcp-gateway-v3 (Keyless ADC)"
 	UpdatedAt    string
 }
 

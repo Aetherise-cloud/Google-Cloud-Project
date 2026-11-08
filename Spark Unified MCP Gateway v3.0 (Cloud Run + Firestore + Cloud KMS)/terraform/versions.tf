@@ -2,7 +2,7 @@ terraform {
   required_version = ">= 1.5.0"
 
   backend "gcs" {
-    bucket = "group-511516-tfstate"
+    bucket = "spark-mcp-gateway-v3-tfstate"
     prefix = "spark-mcp-gateway/terraform/state"
   }
 

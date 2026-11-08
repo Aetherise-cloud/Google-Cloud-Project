@@ -18,6 +18,7 @@ on:
       - '**/go.sum'
       - '*Spark Unified MCP Gateway*/Dockerfile'
       - '*Spark Unified MCP Gateway*/.dockerignore'
+      - '.github/workflows/spark-mcp-gateway-deploy.yml'
       - 'Spark Unified MCP Gateway v3.0 (Cloud Run + Firestore + Cloud KMS)/**'
       - '!Spark Unified MCP Gateway v3.0 (Cloud Run + Firestore + Cloud KMS)/terraform/**'
       - '!Spark Unified MCP Gateway v3.0 (Cloud Run + Firestore + Cloud KMS)/README.md'
@@ -31,12 +32,12 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  PROJECT_ID: group-511516
+  PROJECT_ID: spark-mcp-gateway-v3
   REGION: asia-southeast1
   SERVICE: spark-mcp-gateway
-  IMAGE: asia-southeast1-docker.pkg.dev/group-511516/spark-gateway/gateway
-  WIF_PROVIDER: projects/997395841168/locations/global/workloadIdentityPools/github/providers/github-oidc
-  DEPLOYER_SA: gh-deployer@group-511516.iam.gserviceaccount.com
+  IMAGE: asia-southeast1-docker.pkg.dev/spark-mcp-gateway-v3/spark-gateway/gateway
+  WIF_PROVIDER: projects/515472562394/locations/global/workloadIdentityPools/github/providers/github-oidc
+  DEPLOYER_SA: gh-deployer@spark-mcp-gateway-v3.iam.gserviceaccount.com
 
 jobs:
   ci:
