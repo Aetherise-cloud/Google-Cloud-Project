@@ -103,7 +103,7 @@ jobs:
         continue-on-error: true
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER || 'projects/997395841168/locations/global/workloadIdentityPools/github/providers/github-oidc' }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER || 'projects/997395841168/locations/global/workloadIdentityPools/github/providers/spark-mcp-oidc' }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT || 'gh-deployer@group-511516.iam.gserviceaccount.com' }}
 
       - name: Terraform Init & Validate (PR - Live Backend)
@@ -242,7 +242,7 @@ jobs:
         if: ${{ github.event_name != 'pull_request' }}
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER || 'projects/997395841168/locations/global/workloadIdentityPools/github/providers/github-oidc' }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER || 'projects/997395841168/locations/global/workloadIdentityPools/github/providers/spark-mcp-oidc' }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT || 'gh-deployer@group-511516.iam.gserviceaccount.com' }}
 
       - name: Terraform Init & Validate
@@ -409,9 +409,10 @@ jobs:
 
           const lines = [
             marker,
-            `### Spark MCP Gateway Terraform \`apply\` ${outcome} for State: \`gs://group-511516-tfstate/spark-mcp-gateway/terraform/state\``,
+            `### Spark MCP Gateway Terraform \`plan\`/\`apply\` ${outcome} for State: \`gs://group-511516-tfstate/spark-mcp-gateway/terraform/state\``,
             '',
           ];
+          lines[1] = `### Spark MCP Gateway Terraform \`apply\` ${outcome} for State: \`gs://group-511516-tfstate/spark-mcp-gateway/terraform/state\``;
 
           if (serviceRows.length > 0) {
             lines.push('#### Deployed GCP Services');

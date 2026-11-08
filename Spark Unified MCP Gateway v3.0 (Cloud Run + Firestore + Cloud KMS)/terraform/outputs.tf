@@ -47,3 +47,8 @@ output "runtime_service_account" {
   description = "Runtime service account email used by the Cloud Run service"
   value       = google_service_account.runtime_sa.email
 }
+
+output "wif_provider_name" {
+  description = "Dedicated Workload Identity Pool Provider resource name for Spark MCP Gateway GitHub Actions"
+  value       = google_iam_workload_identity_pool_provider.spark_mcp_oidc.name
+}
