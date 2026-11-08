@@ -131,39 +131,18 @@
 
         <h3 style="margin-bottom: 12px;">Per-Connector Scope Configuration</h3>
         <div class="scope-pills-grid">
+          {{range .Connectors}}
           <div class="scope-pill-item">
-            <span class="scope-pill-label">GitHub</span>
-            <select id="scope_github" name="scope_github" class="form-select" onchange="onScopeChange()">
+            <span class="scope-pill-label">{{.Name}}</span>
+            <select id="scope_{{.ID}}" name="scope_{{.ID}}" class="form-select connector-scope-select" data-connector-id="{{.ID}}" data-keyless="{{.KeylessADC}}" onchange="onScopeChange()">
               <option value="read_only">read_only</option>
+              {{if not .KeylessADC}}
               <option value="full_access">full_access</option>
+              {{end}}
               <option value="none">none</option>
             </select>
           </div>
-
-          <div class="scope-pill-item">
-            <span class="scope-pill-label">Atlassian Jira</span>
-            <select id="scope_jira" name="scope_jira" class="form-select" onchange="onScopeChange()">
-              <option value="read_only">read_only</option>
-              <option value="full_access">full_access</option>
-              <option value="none">none</option>
-            </select>
-          </div>
-
-          <div class="scope-pill-item">
-            <span class="scope-pill-label">Google Cloud Run (GCP)</span>
-            <select id="scope_gcp" name="scope_gcp" class="form-select" onchange="onScopeChange()">
-              <option value="read_only">read_only</option>
-              <option value="none">none</option>
-            </select>
-          </div>
-
-          <div class="scope-pill-item">
-            <span class="scope-pill-label">Google Dev Knowledge (GDK)</span>
-            <select id="scope_gdk" name="scope_gdk" class="form-select" onchange="onScopeChange()">
-              <option value="read_only">read_only</option>
-              <option value="none">none</option>
-            </select>
-          </div>
+          {{end}}
         </div>
 
         <div class="consent-actions">
@@ -176,26 +155,27 @@
 
   <script>
     function syncScopesFromPreset(preset) {
-      var github = document.getElementById('scope_github');
-      var jira = document.getElementById('scope_jira');
-      var gcp = document.getElementById('scope_gcp');
-      var gdk = document.getElementById('scope_gdk');
+      var selects = document.querySelectorAll('.connector-scope-select');
+      for (var i = 0; i < selects.length; i++) {
+        var sel = selects[i];
+        var isKeyless = sel.getAttribute('data-keyless') === 'true';
+        var id = sel.getAttribute('data-connector-id');
 
-      if (preset === 'minimal') {
-        if (github) github.value = 'none';
-        if (jira) jira.value = 'none';
-        if (gcp) gcp.value = 'read_only';
-        if (gdk) gdk.value = 'read_only';
-      } else if (preset === 'read_only') {
-        if (github) github.value = 'read_only';
-        if (jira) jira.value = 'read_only';
-        if (gcp) gcp.value = 'read_only';
-        if (gdk) gdk.value = 'read_only';
-      } else if (preset === 'full_access') {
-        if (github) github.value = 'full_access';
-        if (jira) jira.value = 'full_access';
-        if (gcp) gcp.value = 'read_only';
-        if (gdk) gdk.value = 'read_only';
+        if (preset === 'minimal') {
+          if (isKeyless || id === 'gcp' || id === 'gdk') {
+            sel.value = 'read_only';
+          } else {
+            sel.value = 'none';
+          }
+        } else if (preset === 'read_only') {
+          sel.value = 'read_only';
+        } else if (preset === 'full_access') {
+          if (isKeyless) {
+            sel.value = 'read_only';
+          } else {
+            sel.value = 'full_access';
+          }
+        }
       }
     }
 
