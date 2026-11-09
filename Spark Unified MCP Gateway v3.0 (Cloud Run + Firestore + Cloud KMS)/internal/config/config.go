@@ -31,6 +31,7 @@ type Config struct {
 	GitHubAllowedWriteRepos []string
 	JiraOAuthClientID       string
 	JiraOAuthClientSecret   string
+	NotionAPIToken          string
 	JWTES256PrivateKey      *ecdsa.PrivateKey
 	JWTES256PrivateKeyPEM   string
 	SessionHMACKey          []byte
@@ -57,6 +58,7 @@ func LoadFromEnv() (*Config, error) {
 		GitHubOAuthClientSecret: os.Getenv("GITHUB_OAUTH_CLIENT_SECRET"),
 		JiraOAuthClientID:       os.Getenv("JIRA_OAUTH_CLIENT_ID"),
 		JiraOAuthClientSecret:   os.Getenv("JIRA_OAUTH_CLIENT_SECRET"),
+		NotionAPIToken:          strings.TrimSpace(os.Getenv("NOTION_API_TOKEN")),
 	}
 
 	// Validate service URL

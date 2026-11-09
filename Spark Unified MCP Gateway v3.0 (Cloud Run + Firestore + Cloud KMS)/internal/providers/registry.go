@@ -46,6 +46,7 @@ type Registry struct {
 	MonitoringBaseURL       string
 	IAMBaseURL              string
 	GFlowBaseURL            string
+	NotionBaseURL           string
 }
 
 // NewRegistry creates and registers all 8 MCP tools.
@@ -72,10 +73,12 @@ func NewRegistry(cfg *config.Config, httpClient *http.Client, adcFunc func(ctx c
 		MonitoringBaseURL:       "https://monitoring.googleapis.com",
 		IAMBaseURL:              "https://iam.googleapis.com",
 		GFlowBaseURL:            "",
+		NotionBaseURL:           "https://api.notion.com",
 	}
 
 	r.registerAllTools()
 	r.registerGFlowTools()
+	r.registerNotionTools()
 	return r
 }
 

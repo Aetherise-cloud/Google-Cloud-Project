@@ -5,6 +5,7 @@ locals {
   google_oidc_client_secret_val  = var.google_oidc_client_secret != "" ? var.google_oidc_client_secret : "UNCONFIGURED"
   github_oauth_client_secret_val = var.github_oauth_client_secret != "" ? var.github_oauth_client_secret : "UNCONFIGURED"
   jira_oauth_client_secret_val   = var.jira_oauth_client_secret != "" ? var.jira_oauth_client_secret : "UNCONFIGURED"
+  notion_api_token_val           = var.notion_api_token != "" ? var.notion_api_token : "UNCONFIGURED"
 
   services = [
     "run.googleapis.com",
@@ -290,6 +291,39 @@ resource "google_secret_manager_secret_iam_member" "jira_oauth_secret_accessor" 
   member    = "serviceAccount:${google_service_account.runtime_sa.email}"
 }
 
+# 6.6 Notion API Token
+import {
+  to = google_secret_manager_secret.notion_api_token
+  id = "projects/spark-mcp-gateway-v3/secrets/spark-notion-api-token"
+}
+
+import {
+  to = google_secret_manager_secret_version.notion_api_token_version
+  id = "projects/515472562394/secrets/spark-notion-api-token/versions/1"
+}
+
+resource "google_secret_manager_secret" "notion_api_token" {
+  project   = var.project_id
+  secret_id = "spark-notion-api-token"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.enabled_apis]
+}
+
+resource "google_secret_manager_secret_version" "notion_api_token_version" {
+  secret      = google_secret_manager_secret.notion_api_token.id
+  secret_data = local.notion_api_token_val
+}
+
+resource "google_secret_manager_secret_iam_member" "notion_api_token_accessor" {
+  secret_id = google_secret_manager_secret.notion_api_token.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.runtime_sa.email}"
+}
+
 # 7. Artifact Registry (asia-southeast1)
 resource "google_artifact_registry_repository" "spark_gateway" {
   project       = var.project_id
@@ -441,7 +475,7 @@ resource "google_cloud_run_v2_service" "spark_mcp_gateway" {
         value_source {
           secret_key_ref {
             secret  = google_secret_manager_secret.github_oauth_secret.secret_id
-            version = google_secret_manager_secret_version.github_oauth_secret_version.version
+            version = "2"
           }
         }
       }
@@ -451,7 +485,17 @@ resource "google_cloud_run_v2_service" "spark_mcp_gateway" {
         value_source {
           secret_key_ref {
             secret  = google_secret_manager_secret.jira_oauth_secret.secret_id
-            version = google_secret_manager_secret_version.jira_oauth_secret_version.version
+            version = "2"
+          }
+        }
+      }
+
+      env {
+        name = "NOTION_API_TOKEN"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.notion_api_token.secret_id
+            version = "2"
           }
         }
       }
@@ -483,6 +527,8 @@ resource "google_cloud_run_v2_service" "spark_mcp_gateway" {
     google_secret_manager_secret_version.github_oauth_secret_version,
     google_secret_manager_secret_iam_member.jira_oauth_secret_accessor,
     google_secret_manager_secret_version.jira_oauth_secret_version,
+    google_secret_manager_secret_iam_member.notion_api_token_accessor,
+    google_secret_manager_secret_version.notion_api_token_version,
   ]
 }
 

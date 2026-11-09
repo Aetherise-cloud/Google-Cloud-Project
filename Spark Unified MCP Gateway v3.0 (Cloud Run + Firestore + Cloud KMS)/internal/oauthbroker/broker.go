@@ -175,6 +175,41 @@ func (b *Broker) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			}
 			return gflowView
 		}(),
+		func() ui.ConnectorView {
+			notionConnected := b.cfg.NotionAPIToken != ""
+			accountLabel := ""
+			scopeMode := "full_access"
+			if notionConnected {
+				accountLabel = "Secret Manager (NOTION_API_TOKEN)"
+			}
+			notionView := ui.ConnectorView{
+				ID:            "notion",
+				Name:          "Notion",
+				Description:   "Workspaces, databases, and pages via Notion API",
+				Connected:     notionConnected,
+				KeylessADC:    b.cfg.NotionAPIToken != "",
+				ConnectorType: "rest_api",
+				OAuthConfigOK: true,
+				TemplateID:    "notion",
+				ScopeMode:     scopeMode,
+				AccountLabel:  accountLabel,
+			}
+			if conn, err := b.store.GetConnection(r.Context(), adminEmail, "notion"); err == nil && conn != nil {
+				if tok, err := b.vault.DecryptConnection(r.Context(), conn); err == nil && tok != nil {
+					notionView.Connected = true
+					if tok.AccountLabel != "" {
+						notionView.AccountLabel = tok.AccountLabel
+					}
+					if tok.Scope != "" {
+						notionView.ScopeMode = tok.Scope
+					}
+					if !conn.UpdatedAt.IsZero() {
+						notionView.UpdatedAt = conn.UpdatedAt.Format("2006-01-02 15:04:05")
+					}
+				}
+			}
+			return notionView
+		}(),
 	}
 
 	// Add custom connectors registered for this admin
@@ -601,13 +636,23 @@ func (b *Broker) exchangeJiraCode(ctx context.Context, code, verifier, mode stri
 func (b *Broker) handleOAuthConfig(w http.ResponseWriter, r *http.Request) {
 	adminEmail, err := b.session.GetAdminSession(r)
 	if err != nil {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "unauthorized",
+			"error_description": "Admin session required",
+		})
 		return
 	}
 
 	app := strings.ToLower(r.PathValue("app"))
 	if app != "github" && app != "jira" {
-		http.Error(w, `{"error":"unknown_connector"}`, http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "unknown_connector",
+			"error_description": fmt.Sprintf("Unknown connector %q: must be github or jira", app),
+		})
 		return
 	}
 
@@ -636,12 +681,22 @@ func (b *Broker) handleOAuthConfig(w http.ResponseWriter, r *http.Request) {
 		csrf = r.Header.Get("X-CSRF-Token")
 	}
 	if !b.session.ValidateCSRFToken(csrf, adminEmail) {
-		http.Error(w, `{"error":"invalid_csrf"}`, http.StatusForbidden)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "invalid_csrf",
+			"error_description": "CSRF token validation failed",
+		})
 		return
 	}
 
 	if clientID == "" || clientSecret == "" {
-		http.Error(w, `{"error":"invalid_credentials","error_description":"client_id and client_secret are required"}`, http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "invalid_credentials",
+			"error_description": "client_id and client_secret are required",
+		})
 		return
 	}
 
@@ -654,7 +709,12 @@ func (b *Broker) handleOAuthConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := b.vault.StoreToken(r.Context(), "__oauth_app_config__", app, cfgData); err != nil {
-		http.Error(w, `{"error":"server_error"}`, http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "server_error",
+			"error_description": fmt.Sprintf("Failed saving encrypted credentials to vault: %v", err),
+		})
 		return
 	}
 
@@ -671,7 +731,12 @@ func (b *Broker) handleOAuthConfig(w http.ResponseWriter, r *http.Request) {
 func (b *Broker) handleGitHubPAT(w http.ResponseWriter, r *http.Request) {
 	adminEmail, err := b.session.GetAdminSession(r)
 	if err != nil {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "unauthorized",
+			"error_description": "Admin session required",
+		})
 		return
 	}
 
@@ -704,12 +769,22 @@ func (b *Broker) handleGitHubPAT(w http.ResponseWriter, r *http.Request) {
 		csrf = r.Header.Get("X-CSRF-Token")
 	}
 	if !b.session.ValidateCSRFToken(csrf, adminEmail) {
-		http.Error(w, `{"error":"invalid_csrf"}`, http.StatusForbidden)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "invalid_csrf",
+			"error_description": "CSRF token validation failed",
+		})
 		return
 	}
 
 	if pat == "" {
-		http.Error(w, `{"error":"invalid_request","error_description":"access_token is required"}`, http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "invalid_request",
+			"error_description": "access_token is required",
+		})
 		return
 	}
 	if scopeMode != "full_access" {
@@ -718,7 +793,12 @@ func (b *Broker) handleGitHubPAT(w http.ResponseWriter, r *http.Request) {
 
 	userReq, err := http.NewRequestWithContext(r.Context(), "GET", b.GitHubAPIURL+"/user", nil)
 	if err != nil {
-		http.Error(w, `{"error":"server_error"}`, http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "server_error",
+			"error_description": fmt.Sprintf("Failed creating GitHub validation request: %v", err),
+		})
 		return
 	}
 	userReq.Header.Set("Authorization", "Bearer "+pat)
@@ -726,7 +806,18 @@ func (b *Broker) handleGitHubPAT(w http.ResponseWriter, r *http.Request) {
 
 	userResp, err := b.httpClient.Do(userReq)
 	if err != nil || userResp.StatusCode != http.StatusOK {
-		http.Error(w, `{"error":"invalid_pat","error_description":"Failed validating GitHub Personal Access Token"}`, http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		statusDesc := "network error"
+		if userResp != nil {
+			statusDesc = fmt.Sprintf("GitHub API returned HTTP %d", userResp.StatusCode)
+		} else if err != nil {
+			statusDesc = err.Error()
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "invalid_pat",
+			"error_description": fmt.Sprintf("Failed validating GitHub Personal Access Token (%s)", statusDesc),
+		})
 		return
 	}
 	defer userResp.Body.Close()
@@ -754,7 +845,12 @@ func (b *Broker) handleGitHubPAT(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := b.vault.StoreToken(r.Context(), adminEmail, "github", patData); err != nil {
-		http.Error(w, `{"error":"server_error"}`, http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "server_error",
+			"error_description": fmt.Sprintf("Failed saving encrypted credentials to vault: %v", err),
+		})
 		return
 	}
 
@@ -771,7 +867,12 @@ func (b *Broker) handleGitHubPAT(w http.ResponseWriter, r *http.Request) {
 func (b *Broker) handleCustomConnector(w http.ResponseWriter, r *http.Request) {
 	adminEmail, err := b.session.GetAdminSession(r)
 	if err != nil {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "unauthorized",
+			"error_description": "Admin session required",
+		})
 		return
 	}
 
@@ -825,28 +926,53 @@ func (b *Broker) handleCustomConnector(w http.ResponseWriter, r *http.Request) {
 		csrf = r.Header.Get("X-CSRF-Token")
 	}
 	if !b.session.ValidateCSRFToken(csrf, adminEmail) {
-		http.Error(w, `{"error":"invalid_csrf"}`, http.StatusForbidden)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "invalid_csrf",
+			"error_description": "CSRF token validation failed",
+		})
 		return
 	}
 
 	if !slugRegex.MatchString(slug) {
-		http.Error(w, `{"error":"invalid_slug","error_description":"slug must be 2-30 alphanumeric characters"}`, http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "invalid_slug",
+			"error_description": "slug must be 2-30 alphanumeric characters",
+		})
 		return
 	}
 
 	if name == "" {
-		http.Error(w, `{"error":"invalid_request","error_description":"name is required"}`, http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "invalid_request",
+			"error_description": "name is required",
+		})
 		return
 	}
 
 	if connType != "remote_mcp" && connType != "rest_api" {
-		http.Error(w, `{"error":"invalid_connector_type","error_description":"connector_type must be 'remote_mcp' or 'rest_api'"}`, http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "invalid_connector_type",
+			"error_description": "connector_type must be 'remote_mcp' or 'rest_api'",
+		})
 		return
 	}
 
 	// SSRF protection
 	if err := providers.ValidateUpstreamURLWithTestOption(endpointURL, b.AllowLoopbackForTest); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"invalid_endpoint_url","error_description":%q}`, err.Error()), http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "invalid_endpoint_url",
+			"error_description": err.Error(),
+		})
 		return
 	}
 
@@ -878,7 +1004,12 @@ func (b *Broker) handleCustomConnector(w http.ResponseWriter, r *http.Request) {
 
 	providerKey := "custom:" + slug
 	if err := b.vault.StoreToken(r.Context(), adminEmail, providerKey, customData); err != nil {
-		http.Error(w, `{"error":"server_error"}`, http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "server_error",
+			"error_description": fmt.Sprintf("Failed saving encrypted credentials to vault: %v", err),
+		})
 		return
 	}
 
@@ -904,7 +1035,7 @@ func (b *Broker) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 		app = "custom:" + strings.TrimPrefix(app, "custom-")
 	}
 
-	if app != "github" && app != "jira" && !strings.HasPrefix(app, "custom:") {
+	if app != "github" && app != "jira" && app != "notion" && !strings.HasPrefix(app, "custom:") {
 		http.Error(w, "unknown connector", http.StatusBadRequest)
 		return
 	}
@@ -971,6 +1102,30 @@ func (b *Broker) handleListConnections(w http.ResponseWriter, r *http.Request) {
 			"keyless_adc": true,
 			"scope_mode":  "full_access",
 		},
+		"notion": map[string]interface{}{
+			"connected":        b.cfg.NotionAPIToken != "",
+			"scope_mode":       "full_access",
+			"account_label":    "Secret Manager (NOTION_API_TOKEN)",
+			"oauth_configured": b.cfg.NotionAPIToken != "",
+			"connector_type":   "rest_api",
+		},
+	}
+
+	if conn, err := b.store.GetConnection(r.Context(), adminEmail, "notion"); err == nil && conn != nil {
+		if tok, err := b.vault.DecryptConnection(r.Context(), conn); err == nil && tok != nil {
+			if notionMap, ok := resp["notion"].(map[string]interface{}); ok {
+				notionMap["connected"] = true
+				if tok.Scope != "" {
+					notionMap["scope_mode"] = tok.Scope
+				}
+				if tok.AccountLabel != "" {
+					notionMap["account_label"] = tok.AccountLabel
+				}
+				if tok.ConnectorType != "" {
+					notionMap["connector_type"] = tok.ConnectorType
+				}
+			}
+		}
 	}
 
 	if conn, err := b.store.GetConnection(r.Context(), adminEmail, "gflow"); err == nil && conn != nil {
@@ -1284,7 +1439,10 @@ func (b *Broker) handleSaveWorkspaces(w http.ResponseWriter, r *http.Request) {
 	if err != nil || tok == nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "decryption_failed"})
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "decryption_failed",
+			"error_description": fmt.Sprintf("Failed decrypting connection: %v", err),
+		})
 		return
 	}
 
@@ -1300,7 +1458,10 @@ func (b *Broker) handleSaveWorkspaces(w http.ResponseWriter, r *http.Request) {
 	if err := b.vault.StoreToken(r.Context(), adminEmail, provider, tok); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "store_failed"})
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "server_error",
+			"error_description": fmt.Sprintf("Failed saving encrypted credentials to vault: %v", err),
+		})
 		return
 	}
 

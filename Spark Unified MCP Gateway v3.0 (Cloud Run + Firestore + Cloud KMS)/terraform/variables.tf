@@ -74,7 +74,7 @@ variable "google_oidc_client_secret" {
 variable "github_oauth_client_id" {
   description = "GitHub OAuth 2.0 App Client ID for GitHub connector"
   type        = string
-  default     = ""
+  default     = "Ov23liNi1guJV2p5gY2a"
 }
 
 variable "github_oauth_client_secret" {
@@ -99,11 +99,18 @@ variable "github_repository_id" {
 variable "jira_oauth_client_id" {
   description = "Atlassian / Jira OAuth 2.0 (3LO) App Client ID"
   type        = string
-  default     = ""
+  default     = "wi8UsFac0KHDo1hcFgTyyrgGlUvDURJh"
 }
 
 variable "jira_oauth_client_secret" {
   description = "Atlassian / Jira OAuth 2.0 (3LO) App Client Secret (defaults to UNCONFIGURED if empty)"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "notion_api_token" {
+  description = "Notion Internal Integration API Token (defaults to UNCONFIGURED if empty)"
   type        = string
   sensitive   = true
   default     = ""

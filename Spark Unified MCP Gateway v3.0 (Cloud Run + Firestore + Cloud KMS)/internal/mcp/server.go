@@ -185,6 +185,7 @@ func (s *Server) handleToolsList(w http.ResponseWriter, r *http.Request, req JSO
 	// Check connection statuses for 3LO providers
 	githubConnected := s.isProviderConnected(r.Context(), adminEmail, "github")
 	jiraConnected := s.isProviderConnected(r.Context(), adminEmail, "jira")
+	notionConnected := s.cfg.NotionAPIToken != "" || s.isProviderConnected(r.Context(), adminEmail, "notion")
 
 	for _, t := range allTools {
 		// 1. Check provider connection
@@ -194,11 +195,23 @@ func (s *Server) handleToolsList(w http.ResponseWriter, r *http.Request, req JSO
 		if t.Provider == "jira" && !jiraConnected {
 			continue
 		}
+		if t.Provider == "notion" && !notionConnected {
+			continue
+		}
 
 		// 2. Check scope restrictions granted by token claims
 		scopeMode := claims.Scopes[t.Provider]
 		if scopeMode == "" && t.Provider == "gflow" {
 			if ghScope, ok := claims.Scopes["github"]; ok && ghScope == "full_access" {
+				scopeMode = "full_access"
+			} else {
+				scopeMode = "read_only"
+			}
+		}
+		if scopeMode == "" && t.Provider == "notion" {
+			if ghScope, ok := claims.Scopes["github"]; ok && ghScope == "full_access" {
+				scopeMode = "full_access"
+			} else if jScope, ok := claims.Scopes["jira"]; ok && jScope == "full_access" {
 				scopeMode = "full_access"
 			} else {
 				scopeMode = "read_only"
@@ -449,6 +462,15 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, r *http.Request, req JSO
 			scopeMode = "read_only"
 		}
 	}
+	if scopeMode == "" && toolDef.Provider == "notion" {
+		if ghScope, ok := claims.Scopes["github"]; ok && ghScope == "full_access" {
+			scopeMode = "full_access"
+		} else if jScope, ok := claims.Scopes["jira"]; ok && jScope == "full_access" {
+			scopeMode = "full_access"
+		} else {
+			scopeMode = "read_only"
+		}
+	}
 	if scopeMode == "none" {
 		writeToolError(w, req.ID, fmt.Sprintf("Access denied: token has no permission for provider %s", toolDef.Provider))
 		return
@@ -475,6 +497,23 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, r *http.Request, req JSO
 			if tok, err := s.vault.GetValidAccessToken(r.Context(), adminEmail, "gflow"); err == nil && tok != nil {
 				tokenData = tok
 			}
+		}
+	} else if toolDef.Provider == "notion" {
+		if s.vault != nil {
+			if tok, err := s.vault.GetValidAccessToken(r.Context(), adminEmail, "notion"); err == nil && tok != nil && tok.AccessToken != "" {
+				tokenData = tok
+			}
+		}
+		if tokenData == nil && s.cfg.NotionAPIToken != "" {
+			tokenData = &vault.TokenData{
+				AccessToken:  s.cfg.NotionAPIToken,
+				Scope:        "full_access",
+				AccountLabel: "Secret Manager (NOTION_API_TOKEN)",
+			}
+		}
+		if tokenData == nil || tokenData.AccessToken == "" {
+			writeToolError(w, req.ID, fmt.Sprintf("Provider notion is not configured. Please set NOTION_API_TOKEN or configure a Notion integration secret at %s/dashboard", s.cfg.ServiceURL))
+			return
 		}
 	}
 
@@ -559,8 +598,9 @@ func JSONErrorMiddleware(next http.Handler) http.Handler {
 				w.Header().Set("Retry-After", "3")
 				w.WriteHeader(http.StatusServiceUnavailable)
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"jsonrpc": "2.0",
-					"id":      nil,
+					"jsonrpc":           "2.0",
+					"id":                nil,
+					"error_description": "Upstream service temporarily unavailable or cold-starting",
 					"error": map[string]interface{}{
 						"code":    -32003,
 						"message": "Upstream service temporarily unavailable or cold-starting",
@@ -590,28 +630,43 @@ func JSONErrorMiddleware(next http.Handler) http.Handler {
 		if status == http.StatusServiceUnavailable || status == http.StatusInternalServerError {
 			ct := rw.Header().Get("Content-Type")
 			bodyStr := rw.buf.String()
-			isPlainOrColdStart := strings.Contains(ct, "text/plain") || ct == "" ||
-				strings.HasPrefix(strings.TrimSpace(bodyStr), "Service Unavailable") ||
-				!strings.Contains(bodyStr, `"jsonrpc"`)
+			isMCPPath := r.URL.Path == "/mcp" || strings.HasPrefix(r.URL.Path, "/mcp/")
 
-			if isPlainOrColdStart {
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Retry-After", "3")
-				w.WriteHeader(http.StatusServiceUnavailable)
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"jsonrpc": "2.0",
-					"id":      nil,
-					"error": map[string]interface{}{
-						"code":    -32003,
-						"message": "Upstream service temporarily unavailable or cold-starting",
-						"data": map[string]interface{}{
-							"http_status":         http.StatusServiceUnavailable,
-							"error_code":          "service_unavailable",
-							"retry_after_seconds": 3,
+			hasJSONError := false
+			if strings.Contains(ct, "application/json") || strings.HasPrefix(strings.TrimSpace(bodyStr), "{") {
+				var jsonMap map[string]interface{}
+				if err := json.Unmarshal([]byte(bodyStr), &jsonMap); err == nil && jsonMap != nil {
+					if _, ok := jsonMap["error"]; ok {
+						hasJSONError = true
+					}
+				}
+			}
+
+			if isMCPPath || !hasJSONError {
+				isPlainOrColdStart := strings.Contains(ct, "text/plain") || ct == "" ||
+					strings.HasPrefix(strings.TrimSpace(bodyStr), "Service Unavailable") ||
+					(isMCPPath && !strings.Contains(bodyStr, `"jsonrpc"`))
+
+				if isPlainOrColdStart {
+					w.Header().Set("Content-Type", "application/json")
+					w.Header().Set("Retry-After", "3")
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						"jsonrpc":           "2.0",
+						"id":                nil,
+						"error_description": "Upstream service temporarily unavailable or cold-starting",
+						"error": map[string]interface{}{
+							"code":    -32003,
+							"message": "Upstream service temporarily unavailable or cold-starting",
+							"data": map[string]interface{}{
+								"http_status":         http.StatusServiceUnavailable,
+								"error_code":          "service_unavailable",
+								"retry_after_seconds": 3,
+							},
 						},
-					},
-				})
-				return
+					})
+					return
+				}
 			}
 		}
 

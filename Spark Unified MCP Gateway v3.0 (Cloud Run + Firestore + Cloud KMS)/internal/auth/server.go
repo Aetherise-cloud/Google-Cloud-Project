@@ -487,6 +487,7 @@ func (s *OAuthServer) handleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 		{ID: "gcp", Name: "Google Cloud Platform (GCP MCP)", Description: "Read-only Cloud Run, Logging, Storage, Artifact Registry, Monitoring & IAM via keyless ADC", KeylessADC: true, Connected: true, ScopeMode: "read_only"},
 		{ID: "gdk", Name: "Google Developer Knowledge", Description: "Developer Knowledge documentation search via keyless ADC", KeylessADC: true, Connected: true, ScopeMode: "read_only"},
 		{ID: "gflow", Name: "Google Flow (gflow MCP)", Description: "AI image (Nano Banana / Imagen) & video (Veo) generation, upscaling & character catalog", KeylessADC: true, Connected: true, ScopeMode: "full_access"},
+		{ID: "notion", Name: "Notion", Description: "Workspaces, databases, and pages via Notion API", KeylessADC: s.cfg.NotionAPIToken != "", Connected: s.cfg.NotionAPIToken != "", ScopeMode: "full_access", AccountLabel: "Secret Manager (NOTION_API_TOKEN)"},
 	}
 
 	// Also load custom connectors and connection state for consent page
@@ -510,6 +511,18 @@ func (s *OAuthServer) handleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 						connectors[1].AllowedSpaceKeys = tok.AllowedSpaceKeys
 						connectors[1].SiteName = tok.SiteName
 						connectors[1].CloudID = tok.CloudID
+					}
+				}
+			} else if conn.Provider == "notion" {
+				connectors[5].Connected = true
+				if s.vault != nil {
+					if tok, err := s.vault.DecryptConnection(r.Context(), conn); err == nil && tok != nil {
+						if tok.AccountLabel != "" {
+							connectors[5].AccountLabel = tok.AccountLabel
+						}
+						if tok.Scope != "" {
+							connectors[5].ScopeMode = tok.Scope
+						}
 					}
 				}
 			} else if strings.HasPrefix(conn.Provider, "custom:") {
@@ -661,12 +674,14 @@ func (s *OAuthServer) handleAuthorizePost(w http.ResponseWriter, r *http.Request
 		scopes["gcp"] = "read_only"
 		scopes["gdk"] = "read_only"
 		scopes["gflow"] = "read_only"
+		scopes["notion"] = "read_only"
 	case "full_access":
 		scopes["github"] = "full_access"
 		scopes["jira"] = "full_access"
 		scopes["gcp"] = "read_only"
 		scopes["gdk"] = "read_only"
 		scopes["gflow"] = "full_access"
+		scopes["notion"] = "full_access"
 	case "custom":
 		scopes["github"] = r.FormValue("scope_github")
 		scopes["jira"] = r.FormValue("scope_jira")
@@ -677,12 +692,18 @@ func (s *OAuthServer) handleAuthorizePost(w http.ResponseWriter, r *http.Request
 			gflowScope = "read_only"
 		}
 		scopes["gflow"] = gflowScope
+		notionScope := r.FormValue("scope_notion")
+		if notionScope == "" {
+			notionScope = "read_only"
+		}
+		scopes["notion"] = notionScope
 	default: // "read_only"
 		scopes["github"] = "read_only"
 		scopes["jira"] = "read_only"
 		scopes["gcp"] = "read_only"
 		scopes["gdk"] = "read_only"
 		scopes["gflow"] = "read_only"
+		scopes["notion"] = "read_only"
 	}
 
 	// Also handle custom connectors
