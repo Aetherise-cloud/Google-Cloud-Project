@@ -38,6 +38,11 @@ type TokenData struct {
 	OAuthClientID     string `json:"oauth_client_id,omitempty"`
 	OAuthClientSecret string `json:"oauth_client_secret,omitempty"`
 	AllowedWriteRepos string `json:"allowed_write_repos,omitempty"`
+
+	SelectedOrgs     []string `json:"selected_orgs,omitempty"`
+	AllowedReadRepos []string `json:"allowed_read_repos,omitempty"`
+	AllowedSpaceKeys []string `json:"allowed_space_keys,omitempty"`
+	SiteName         string   `json:"site_name,omitempty"`
 }
 
 type cachedItem struct {
@@ -328,6 +333,11 @@ func (v *TokenVault) getValidAccessTokenLocked(ctx context.Context, userID, prov
 				return nil, fmt.Errorf("upstream token refresh failed: %w", err)
 			}
 
+			preserveTokenFields(curToken, refreshedToken)
+			if refreshedToken.UpdatedAt.IsZero() {
+				refreshedToken.UpdatedAt = time.Now()
+			}
+
 			// Encrypt refreshed token
 			refreshedBytes, err := json.Marshal(refreshedToken)
 			if err != nil {
@@ -371,6 +381,7 @@ func (v *TokenVault) getValidAccessTokenLocked(ctx context.Context, userID, prov
 				Nonce:         nonce,
 				Ciphertext:    ct,
 				KMSKeyVersion: keyVer,
+				UpdatedAt:     time.Now(),
 			}
 
 			// Release lease and atomically save new connection
@@ -417,4 +428,186 @@ func (v *TokenVault) getValidAccessTokenLocked(ctx context.Context, userID, prov
 // InstanceID returns this vault instance's ID.
 func (v *TokenVault) InstanceID() string {
 	return v.instanceID
+}
+
+func preserveTokenFields(curToken, refreshedToken *TokenData) {
+	if len(refreshedToken.SelectedOrgs) == 0 {
+		refreshedToken.SelectedOrgs = curToken.SelectedOrgs
+	}
+	if len(refreshedToken.AllowedReadRepos) == 0 {
+		refreshedToken.AllowedReadRepos = curToken.AllowedReadRepos
+	}
+	if refreshedToken.AllowedWriteRepos == "" {
+		refreshedToken.AllowedWriteRepos = curToken.AllowedWriteRepos
+	}
+	if len(refreshedToken.AllowedSpaceKeys) == 0 {
+		refreshedToken.AllowedSpaceKeys = curToken.AllowedSpaceKeys
+	}
+	if refreshedToken.SiteName == "" {
+		refreshedToken.SiteName = curToken.SiteName
+	}
+	if refreshedToken.CloudID == "" {
+		refreshedToken.CloudID = curToken.CloudID
+	}
+	if refreshedToken.SiteURL == "" {
+		refreshedToken.SiteURL = curToken.SiteURL
+	}
+	if refreshedToken.AccountLabel == "" {
+		refreshedToken.AccountLabel = curToken.AccountLabel
+	}
+	if refreshedToken.Scope == "" {
+		refreshedToken.Scope = curToken.Scope
+	}
+	if refreshedToken.ConnectorName == "" {
+		refreshedToken.ConnectorName = curToken.ConnectorName
+	}
+	if refreshedToken.Description == "" {
+		refreshedToken.Description = curToken.Description
+	}
+	if refreshedToken.ConnectorType == "" {
+		refreshedToken.ConnectorType = curToken.ConnectorType
+	}
+	if refreshedToken.TemplateID == "" {
+		refreshedToken.TemplateID = curToken.TemplateID
+	}
+	if refreshedToken.EndpointURL == "" {
+		refreshedToken.EndpointURL = curToken.EndpointURL
+	}
+	if refreshedToken.AuthHeader == "" {
+		refreshedToken.AuthHeader = curToken.AuthHeader
+	}
+	if refreshedToken.OAuthClientID == "" {
+		refreshedToken.OAuthClientID = curToken.OAuthClientID
+	}
+	if refreshedToken.OAuthClientSecret == "" {
+		refreshedToken.OAuthClientSecret = curToken.OAuthClientSecret
+	}
+}
+
+// ForceRefreshToken invalidates cache, acquires distributed connection lease,
+// invokes refreshFunc, preserves workspace scope and identity fields, encrypts
+// and stores the refreshed token with KMS, releases lease, and updates cache.
+func (v *TokenVault) ForceRefreshToken(ctx context.Context, userID, provider string) (*TokenData, error) {
+	v.InvalidateCache(userID, provider)
+
+	if v.refreshFunc == nil {
+		return nil, errors.New("cannot force refresh: no refreshFunc registered")
+	}
+
+	ck := cacheKey(userID, provider)
+	deadline := time.Now().Add(12 * time.Second)
+	for {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if time.Now().After(deadline) {
+			return nil, errors.New("timeout waiting for distributed token refresh lease during force refresh")
+		}
+
+		curConn, acquired, err := v.store.AcquireConnectionLease(ctx, userID, provider, v.instanceID, 15*time.Second)
+		if err != nil {
+			return nil, err
+		}
+
+		if acquired {
+			curToken, err := v.DecryptConnection(ctx, curConn)
+			if err != nil {
+				_ = v.store.ReleaseConnectionLease(ctx, userID, provider, v.instanceID, nil)
+				return nil, err
+			}
+
+			refreshedToken, err := v.refreshFunc(ctx, provider, curToken)
+			if err != nil {
+				_ = v.store.ReleaseConnectionLease(ctx, userID, provider, v.instanceID, nil)
+				return nil, fmt.Errorf("upstream token refresh failed: %w", err)
+			}
+
+			preserveTokenFields(curToken, refreshedToken)
+			if refreshedToken.UpdatedAt.IsZero() {
+				refreshedToken.UpdatedAt = time.Now()
+			}
+
+			refreshedBytes, err := json.Marshal(refreshedToken)
+			if err != nil {
+				_ = v.store.ReleaseConnectionLease(ctx, userID, provider, v.instanceID, nil)
+				return nil, err
+			}
+
+			dek := make([]byte, 32)
+			if _, err := io.ReadFull(rand.Reader, dek); err != nil {
+				_ = v.store.ReleaseConnectionLease(ctx, userID, provider, v.instanceID, nil)
+				return nil, fmt.Errorf("failed generating refreshed DEK: %w", err)
+			}
+			block, err := aes.NewCipher(dek)
+			if err != nil {
+				_ = v.store.ReleaseConnectionLease(ctx, userID, provider, v.instanceID, nil)
+				return nil, err
+			}
+			gcm, err := cipher.NewGCM(block)
+			if err != nil {
+				_ = v.store.ReleaseConnectionLease(ctx, userID, provider, v.instanceID, nil)
+				return nil, err
+			}
+			nonce := make([]byte, gcm.NonceSize())
+			if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+				_ = v.store.ReleaseConnectionLease(ctx, userID, provider, v.instanceID, nil)
+				return nil, fmt.Errorf("failed generating refreshed nonce: %w", err)
+			}
+			aad := buildAAD(userID, provider)
+			ct := gcm.Seal(nil, nonce, refreshedBytes, aad)
+
+			wrappedDEK, keyVer, err := v.kms.Encrypt(ctx, v.kmsKeyName, dek)
+			if err != nil {
+				_ = v.store.ReleaseConnectionLease(ctx, userID, provider, v.instanceID, nil)
+				return nil, fmt.Errorf("failed wrapping refreshed DEK: %w", err)
+			}
+
+			newConn := &store.EncryptedConnection{
+				UserID:        userID,
+				Provider:      provider,
+				WrappedDEK:    wrappedDEK,
+				Nonce:         nonce,
+				Ciphertext:    ct,
+				KMSKeyVersion: keyVer,
+				UpdatedAt:     time.Now(),
+			}
+
+			if err := v.store.ReleaseConnectionLease(ctx, userID, provider, v.instanceID, newConn); err != nil {
+				return nil, fmt.Errorf("failed releasing lease with new connection: %w", err)
+			}
+
+			v.cacheMu.Lock()
+			v.cache[ck] = &cachedItem{token: refreshedToken, expiresAt: time.Now().Add(60 * time.Second)}
+			v.cacheMu.Unlock()
+
+			return refreshedToken, nil
+		}
+
+		// Another instance holds active lease: back off with 300ms + jitter
+		jitter, err := rand.Int(rand.Reader, big.NewInt(150))
+		sleepJitter := 50 * time.Millisecond
+		if err == nil {
+			sleepJitter = time.Duration(jitter.Int64()) * time.Millisecond
+		}
+		sleepDuration := 300*time.Millisecond + sleepJitter
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(sleepDuration):
+		}
+
+		// Check if the other instance has finished refresh
+		latestConn, err := v.store.GetConnection(ctx, userID, provider)
+		if err == nil {
+			latestToken, err := v.DecryptConnection(ctx, latestConn)
+			if err == nil && time.Until(latestToken.ExpiresAt) > 60*time.Second {
+				// Refresh was successfully completed by lease holder!
+				v.cacheMu.Lock()
+				v.cache[ck] = &cachedItem{token: latestToken, expiresAt: time.Now().Add(60 * time.Second)}
+				v.cacheMu.Unlock()
+				return latestToken, nil
+			}
+		}
+	}
 }

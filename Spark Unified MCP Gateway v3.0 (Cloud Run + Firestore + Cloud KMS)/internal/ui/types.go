@@ -18,6 +18,13 @@ type ConnectorView struct {
 	AccountLabel  string
 	UpdatedAt     string
 	TemplateID    string // "github", "jira", "slack", "notion", "linear", "cloudflare", "sentry", "supabase", "custom_mcp", "custom_api"
+
+	SelectedOrgs      []string // V4 Workspace Picker: selected GitHub organizations (e.g. ["aetherise-cloud"])
+	AllowedReadRepos  []string // V4 Workspace Picker: allowed GitHub read repositories (e.g. ["aetherise-cloud/*"])
+	AllowedWriteRepos []string // V4 Workspace Picker: allowed GitHub write repositories (e.g. ["aetherise-cloud/spark-mcp-gateway"])
+	AllowedSpaceKeys  []string // V4 Workspace Picker: allowed Jira project/space keys (e.g. ["SPARK", "ONB"])
+	SiteName          string   // V4 Workspace Picker: bound Atlassian Jira site name
+	CloudID           string   // V4 Workspace Picker: bound Atlassian Jira cloudId
 }
 
 // LoginPageData holds data passed to RenderLogin.
