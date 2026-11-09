@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -181,5 +182,43 @@ func Test20GoroutineMultiInstanceRefreshRace(t *testing.T) {
 		if tok.RefreshToken != "atlassian-rt-v2-rotated" {
 			t.Errorf("caller %d expected refresh token 'atlassian-rt-v2-rotated', got %q", i, tok.RefreshToken)
 		}
+	}
+}
+
+func TestNewCloudKMSClientDefaultTokenFunc(t *testing.T) {
+	client := NewCloudKMSClient(nil, nil)
+	if client == nil {
+		t.Fatal("expected non-nil CloudKMSClient")
+	}
+	if client.tokenFunc == nil {
+		t.Fatal("expected non-nil tokenFunc when initialized with nil")
+	}
+	if client.httpClient == nil {
+		t.Fatal("expected non-nil httpClient when initialized with nil")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	// Calling Encrypt with non-nil tokenFunc attempts to fetch token, does not panic
+	_, _, err := client.Encrypt(ctx, "projects/p/locations/l/keyRings/r/cryptoKeys/k", []byte("test"))
+	if err == nil {
+		t.Fatal("expected error in test environment")
+	}
+
+	// Also verify struct literal with nil tokenFunc defensively falls back to fetchGCEMetadataToken without panic
+	rawClient := &CloudKMSClient{
+		baseURL:    "https://cloudkms.googleapis.com/v1",
+		httpClient: &http.Client{Timeout: 50 * time.Millisecond},
+		tokenFunc:  nil,
+	}
+	_, _, err2 := rawClient.Encrypt(ctx, "projects/p/locations/l/keyRings/r/cryptoKeys/k", []byte("test"))
+	if err2 == nil {
+		t.Fatal("expected error in test environment")
+	}
+
+	_, err3 := rawClient.Decrypt(ctx, "projects/p/locations/l/keyRings/r/cryptoKeys/k", []byte("test"))
+	if err3 == nil {
+		t.Fatal("expected error in test environment")
 	}
 }

@@ -82,11 +82,40 @@ func NewCloudKMSClient(httpClient *http.Client, tokenFunc func(ctx context.Conte
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
+	if tokenFunc == nil {
+		tokenFunc = fetchGCEMetadataToken
+	}
 	return &CloudKMSClient{
 		baseURL:    "https://cloudkms.googleapis.com/v1",
 		httpClient: httpClient,
 		tokenFunc:  tokenFunc,
 	}
+}
+
+func fetchGCEMetadataToken(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Metadata-Flavor", "Google")
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed reaching GCE metadata server: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("metadata server returned status %d", resp.StatusCode)
+	}
+
+	var res struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return "", err
+	}
+	return res.AccessToken, nil
 }
 
 // SetBaseURL overrides the KMS endpoint for testing.
@@ -108,7 +137,11 @@ func (c *CloudKMSClient) Encrypt(ctx context.Context, keyName string, plaintext 
 	if err != nil {
 		return nil, "", err
 	}
-	token, err := c.tokenFunc(ctx)
+	tf := c.tokenFunc
+	if tf == nil {
+		tf = fetchGCEMetadataToken
+	}
+	token, err := tf(ctx)
 	if err != nil {
 		return nil, "", fmt.Errorf("kms auth token error: %w", err)
 	}
@@ -156,7 +189,11 @@ func (c *CloudKMSClient) Decrypt(ctx context.Context, keyName string, ciphertext
 	if err != nil {
 		return nil, err
 	}
-	token, err := c.tokenFunc(ctx)
+	tf := c.tokenFunc
+	if tf == nil {
+		tf = fetchGCEMetadataToken
+	}
+	token, err := tf(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("kms auth token error: %w", err)
 	}
