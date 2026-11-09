@@ -522,3 +522,86 @@ func TestGoogleOIDCLoginAndVerification(t *testing.T) {
 		t.Fatalf("expected 302 redirect after successful OIDC login, got %d", recValid.Code)
 	}
 }
+
+func TestOAuth21EndpointAliases(t *testing.T) {
+	server, _, _ := newTestAuthServer(t)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+
+	// 1. Test POST /register alias (DCR)
+	dcrBody := `{"client_name":"Alias Client","redirect_uris":["https://oauth-redirect.googleusercontent.com/r/alias-app"]}`
+	reqReg := httptest.NewRequest("POST", "/register", strings.NewReader(dcrBody))
+	reqReg.Header.Set("Content-Type", "application/json")
+	recReg := httptest.NewRecorder()
+	mux.ServeHTTP(recReg, reqReg)
+
+	if recReg.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created from /register alias, got %d: %s", recReg.Code, recReg.Body.String())
+	}
+
+	var dcrRes struct {
+		ClientID     string `json:"client_id"`
+		ClientSecret string `json:"client_secret"`
+	}
+	if err := json.Unmarshal(recReg.Body.Bytes(), &dcrRes); err != nil {
+		t.Fatalf("failed decoding /register response: %v", err)
+	}
+
+	// 2. Authorize with the client registered via /register
+	adminEmail := "brendon.ang20011007@gmail.com"
+	recLogin := httptest.NewRecorder()
+	server.SessionManager().SetAdminSession(recLogin, adminEmail)
+	cookieHeader := recLogin.Header().Get("Set-Cookie")
+	csrfToken := server.SessionManager().GenerateCSRFToken(adminEmail)
+
+	authForm := url.Values{
+		"decision":     {"approve"},
+		"client_id":    {dcrRes.ClientID},
+		"redirect_uri": {"https://oauth-redirect.googleusercontent.com/r/alias-app"},
+		"state":        {"alias-state"},
+		"csrf_token":   {csrfToken},
+		"preset":       {"read_only"},
+	}
+	reqAuth := httptest.NewRequest("POST", "/authorize", strings.NewReader(authForm.Encode()))
+	reqAuth.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqAuth.Header.Set("Cookie", cookieHeader)
+	recAuth := httptest.NewRecorder()
+	mux.ServeHTTP(recAuth, reqAuth)
+
+	if recAuth.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect from /authorize, got %d: %s", recAuth.Code, recAuth.Body.String())
+	}
+
+	loc, _ := url.Parse(recAuth.Header().Get("Location"))
+	code := loc.Query().Get("code")
+	if code == "" {
+		t.Fatal("expected authorization code in redirect location")
+	}
+
+	// 3. Test POST /token alias
+	tokenForm := url.Values{
+		"grant_type":   {"authorization_code"},
+		"code":         {code},
+		"redirect_uri": {"https://oauth-redirect.googleusercontent.com/r/alias-app"},
+	}
+	reqToken := httptest.NewRequest("POST", "/token", strings.NewReader(tokenForm.Encode()))
+	reqToken.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqToken.SetBasicAuth(dcrRes.ClientID, dcrRes.ClientSecret)
+	recToken := httptest.NewRecorder()
+	mux.ServeHTTP(recToken, reqToken)
+
+	if recToken.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /token alias, got %d: %s", recToken.Code, recToken.Body.String())
+	}
+
+	var tokRes struct {
+		AccessToken string `json:"access_token"`
+		TokenType   string `json:"token_type"`
+	}
+	if err := json.Unmarshal(recToken.Body.Bytes(), &tokRes); err != nil {
+		t.Fatalf("failed decoding /token response: %v", err)
+	}
+	if tokRes.AccessToken == "" || tokRes.TokenType != "Bearer" {
+		t.Errorf("unexpected token response: %+v", tokRes)
+	}
+}
