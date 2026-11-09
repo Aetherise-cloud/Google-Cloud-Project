@@ -462,7 +462,7 @@ func (r *Registry) handleJiraCreateIssue(ctx context.Context, args map[string]in
 	}
 
 	var created struct {
-		ID  string `json:"key"`
+		ID  string `json:"id"`
 		Key string `json:"key"`
 	}
 	if err := json.Unmarshal(respBody, &created); err != nil {
