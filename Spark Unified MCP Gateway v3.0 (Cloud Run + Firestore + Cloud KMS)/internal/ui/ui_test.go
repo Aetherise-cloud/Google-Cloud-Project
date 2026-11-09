@@ -257,6 +257,140 @@ func TestRenderDashboard(t *testing.T) {
 	}
 }
 
+func TestRenderDashboard_MarketplaceAndCatalog(t *testing.T) {
+	connectors := []ui.ConnectorView{
+		{
+			ID:            "github",
+			Name:          "GitHub",
+			Description:   "GitHub repository, issue, and code search integration",
+			Connected:     false,
+			NeedsConfig:   true,
+			ConnectorType: "oauth2",
+		},
+		{
+			ID:            "jira",
+			Name:          "Atlassian Jira",
+			Description:   "Jira workspace issue and project tracking",
+			Connected:     true,
+			NeedsConfig:   false,
+			AccountLabel:  "team.atlassian.net",
+			ConnectorType: "oauth2",
+		},
+		{
+			ID:            "custom:linear",
+			Name:          "Linear",
+			Description:   "Linear issues via Remote MCP",
+			Connected:     true,
+			IsCustom:      true,
+			ConnectorType: "remote_mcp",
+			EndpointURL:   "https://mcp.linear.app/mcp",
+			ScopeMode:     "read_only",
+			TemplateID:    "linear",
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	data := ui.DashboardPageData{
+		AdminEmail:  "admin@example.com",
+		ServiceURL:  "https://gateway.example.com",
+		MCPEndpoint: "https://gateway.example.com/mcp",
+		CSRFToken:   "csrf-marketplace-token",
+		Connectors:  connectors,
+	}
+
+	err := ui.RenderDashboard(rec, http.StatusOK, data)
+	if err != nil {
+		t.Fatalf("RenderDashboard failed: %v", err)
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	assertSecurityHeaders(t, rec)
+	body := rec.Body.String()
+
+	// + Add Connector button
+	if !strings.Contains(body, "+ Add Connector") || !strings.Contains(body, "openCatalogModal()") {
+		t.Errorf("expected + Add Connector button invoking openCatalogModal()")
+	}
+
+	// Gemini Setup Guide button
+	if !strings.Contains(body, "Gemini Setup Guide") || !strings.Contains(body, "openClientGuideModal()") {
+		t.Errorf("expected Gemini Setup Guide button in direct-link banner")
+	}
+
+	// NeedsConfig warning badge on GitHub
+	if !strings.Contains(body, "Needs OAuth Setup") {
+		t.Errorf("expected Needs OAuth Setup badge for connector with NeedsConfig=true")
+	}
+
+	// Connect button on NeedsConfig opens setup modal
+	if !strings.Contains(body, `onclick="openSetupModal('github')"`) {
+		t.Errorf("expected Connect button on unconfigured GitHub to open setup modal")
+	}
+
+	// Tutorial & Configure button on built-in cards
+	if !strings.Contains(body, "Tutorial &amp; Configure") {
+		t.Errorf("expected Tutorial & Configure button on connector card")
+	}
+
+	// Custom connector rendering
+	if !strings.Contains(body, "https://mcp.linear.app/mcp") {
+		t.Errorf("expected custom connector endpoint URL to be rendered in meta")
+	}
+	if !strings.Contains(body, "Tutorial &amp; Edit") {
+		t.Errorf("expected Tutorial & Edit button on custom connector card")
+	}
+	if !strings.Contains(body, `/api/connections/custom:linear/disconnect`) {
+		t.Errorf("expected disconnect/remove form for custom connector")
+	}
+
+	// Verify Catalog Modal templates
+	expectedTemplates := []string{
+		"data-name=\"github\"",
+		"data-name=\"atlassian jira\"",
+		"data-name=\"linear\"",
+		"data-name=\"notion\"",
+		"data-name=\"slack\"",
+		"data-name=\"cloudflare\"",
+		"data-name=\"sentry\"",
+		"data-name=\"supabase\"",
+		"data-name=\"custom remote mcp server\"",
+		"data-name=\"custom rest api connector\"",
+	}
+	for _, tpl := range expectedTemplates {
+		if !strings.Contains(body, tpl) {
+			t.Errorf("missing catalog connector template: %s", tpl)
+		}
+	}
+
+	// Verify Setup Modal elements
+	if !strings.Contains(body, "id=\"setup-modal\"") {
+		t.Errorf("expected setup modal dialog")
+	}
+	if !strings.Contains(body, "Quick Connect (Personal Access Token)") {
+		t.Errorf("expected GitHub PAT tab")
+	}
+	if !strings.Contains(body, "OAuth 2.0 App (Popup Flow)") {
+		t.Errorf("expected GitHub OAuth tab")
+	}
+	if !strings.Contains(body, "https://gateway.example.com/oauth/callback/github") {
+		t.Errorf("expected GitHub OAuth callback URL snippet")
+	}
+	if !strings.Contains(body, "https://gateway.example.com/oauth/callback/jira") {
+		t.Errorf("expected Jira OAuth callback URL snippet")
+	}
+
+	// Verify Client Setup Guide Modal elements
+	if !strings.Contains(body, "id=\"client-guide-modal\"") {
+		t.Errorf("expected client guide modal dialog")
+	}
+	if !strings.Contains(body, "btn-gen-static-client") {
+		t.Errorf("expected static OAuth client generator button")
+	}
+}
+
 func TestRenderAuthorize(t *testing.T) {
 	connectors := []ui.ConnectorView{
 		{
@@ -423,7 +557,6 @@ func TestRenderAuthorize(t *testing.T) {
 			matched := false
 			for i, line := range lines {
 				if strings.Contains(line, expectedCheckedFragment) {
-					// Check this line and subsequent line for 'checked'
 					combined := line
 					if i+1 < len(lines) {
 						combined += " " + lines[i+1]
@@ -474,6 +607,118 @@ func TestRenderAuthorize(t *testing.T) {
 			t.Errorf("expected HTML escaping of script tags")
 		}
 	})
+}
+
+func TestRenderAuthorize_CustomConnectors(t *testing.T) {
+	connectors := []ui.ConnectorView{
+		{
+			ID:         "gcp",
+			Name:       "Google Cloud Run",
+			Connected:  true,
+			KeylessADC: true,
+		},
+		{
+			ID:         "github",
+			Name:       "GitHub",
+			Connected:  true,
+			KeylessADC: false,
+		},
+		{
+			ID:            "custom:slack",
+			Name:          "Slack Workspace",
+			Connected:     true,
+			IsCustom:      true,
+			ConnectorType: "rest_api",
+		},
+		{
+			ID:            "custom:linear",
+			Name:          "Linear Issues",
+			Connected:     false,
+			IsCustom:      true,
+			ConnectorType: "remote_mcp",
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	data := ui.AuthorizePageData{
+		AdminEmail:    "admin@example.com",
+		ServiceURL:    "https://gateway.example.com",
+		ClientID:      "test-client",
+		ClientName:    "Test MCP Client",
+		RedirectURI:   "https://client.example.com/callback",
+		State:         "state123",
+		CSRFToken:     "csrf-auth",
+		DefaultPreset: "read_only",
+		Connectors:    connectors,
+	}
+
+	err := ui.RenderAuthorize(rec, http.StatusOK, data)
+	if err != nil {
+		t.Fatalf("RenderAuthorize failed: %v", err)
+	}
+
+	body := rec.Body.String()
+
+	// Verify custom connector scope selects
+	expectedScopeSelects := []string{
+		`id="scope_custom:slack" name="scope_custom:slack"`,
+		`id="scope_custom:linear" name="scope_custom:linear"`,
+		`id="scope_github" name="scope_github"`,
+		`id="scope_gcp" name="scope_gcp"`,
+	}
+	for _, sel := range expectedScopeSelects {
+		if !strings.Contains(body, sel) {
+			t.Errorf("missing scope select: %s", sel)
+		}
+	}
+
+	// Verify custom connector names in upstream status
+	if !strings.Contains(body, "Slack Workspace") {
+		t.Errorf("expected custom connector name in upstream status")
+	}
+	if !strings.Contains(body, "Linear Issues") {
+		t.Errorf("expected custom connector name in upstream status")
+	}
+}
+
+func TestRenderDashboard_XSSAutoEscaping(t *testing.T) {
+	connectors := []ui.ConnectorView{
+		{
+			ID:           "custom:xss",
+			Name:         "<script>alert('name')</script>",
+			Description:  "<img src=x onerror=alert('desc')>",
+			AccountLabel: "<b>evil-account</b>",
+			EndpointURL:  "https://evil.example.com/<script>",
+			Connected:    true,
+			IsCustom:     true,
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	data := ui.DashboardPageData{
+		AdminEmail:   "admin@example.com",
+		MCPEndpoint:  "https://gateway.example.com/mcp",
+		CSRFToken:    "token",
+		Connectors:   connectors,
+		FlashMessage: "<script>alert('flash')</script>",
+	}
+
+	err := ui.RenderDashboard(rec, http.StatusOK, data)
+	if err != nil {
+		t.Fatalf("RenderDashboard failed: %v", err)
+	}
+
+	body := rec.Body.String()
+
+	if strings.Contains(body, "<script>alert('name')</script>") {
+		t.Errorf("raw XSS script tag found for connector name")
+	}
+	if strings.Contains(body, "<img src=x onerror=alert('desc')>") {
+		t.Errorf("raw XSS img tag found for connector description")
+	}
+	if strings.Contains(body, "<script>alert('flash')</script>") {
+		t.Errorf("raw XSS script tag found for flash message")
+	}
 }
 
 func TestRenderOAuthCallback(t *testing.T) {

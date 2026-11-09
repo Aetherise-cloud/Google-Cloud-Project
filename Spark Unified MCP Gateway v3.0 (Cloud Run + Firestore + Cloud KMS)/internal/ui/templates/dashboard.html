@@ -7,6 +7,9 @@
   {{template "styles" .}}
 </head>
 <body>
+  <div id="service-url-val" data-url="{{.ServiceURL}}" style="display:none;"></div>
+  <input type="hidden" id="dashboard-csrf-token" value="{{.CSRFToken}}">
+
   <header class="app-header">
     <div class="app-header-content">
       <div class="brand">
@@ -41,13 +44,17 @@
       <div class="endpoint-code-box">
         <div class="endpoint-code" id="mcp-endpoint-val">{{.MCPEndpoint}}</div>
         <button type="button" class="btn btn-sm btn-primary" id="copy-endpoint-btn" onclick="copyMCPEndpoint()">Copy</button>
+        <button type="button" class="btn btn-sm btn-secondary" id="gemini-guide-btn" onclick="openClientGuideModal()">Gemini Setup Guide</button>
       </div>
     </div>
 
     <section>
-      <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px;">
-        <h2>Connector Marketplace</h2>
-        <span class="text-muted">Managed third-party and keyless ADC backends</span>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
+        <div>
+          <h2>Connector Marketplace</h2>
+          <span class="text-muted">Managed third-party, custom MCP &amp; REST APIs, and keyless ADC backends</span>
+        </div>
+        <button type="button" class="btn btn-primary" id="add-connector-btn" onclick="openCatalogModal()">+ Add Connector</button>
       </div>
 
       <div class="marketplace-grid">
@@ -67,6 +74,12 @@
                     <span class="badge badge-connected">Connected</span>
                   {{else}}
                     <span class="badge badge-disconnected">Not Connected</span>
+                    {{if .NeedsConfig}}
+                    <span class="badge badge-warning">Needs OAuth Setup (SETUP REQUIRED)</span>
+                    {{end}}
+                  {{end}}
+                  {{if .IsCustom}}
+                    <span class="badge badge-custom">{{if eq .ConnectorType "rest_api"}}REST API{{else}}Custom MCP{{end}}</span>
                   {{end}}
                 {{end}}
               </div>
@@ -87,9 +100,15 @@
                 <span class="meta-val">{{.UpdatedAt}}</span>
               </div>
               {{end}}
+              {{if .EndpointURL}}
+              <div class="connector-meta-row">
+                <span class="meta-label">Endpoint:</span>
+                <span class="meta-val">{{.EndpointURL}}</span>
+              </div>
+              {{end}}
               <div class="connector-meta-row">
                 <span class="meta-label">Type:</span>
-                <span class="meta-val">{{if .KeylessADC}}Keyless Google ADC{{else}}OAuth 2.0 Integration{{end}}</span>
+                <span class="meta-val">{{if .KeylessADC}}Keyless Google ADC{{else if .IsCustom}}{{if eq .ConnectorType "rest_api"}}Custom REST API{{else}}Custom Remote MCP{{end}}{{else}}OAuth 2.0 Integration{{end}}</span>
               </div>
             </div>
           </div>
@@ -99,19 +118,42 @@
               <div class="text-muted" style="font-size: 0.82rem; font-style: italic;">
                 Always active via Google Cloud Application Default Credentials. No manual authorization required.
               </div>
+            {{else if .IsCustom}}
+              <div class="scope-select-row">
+                <span style="color: var(--text-muted);">Scope:</span>
+                <span class="badge badge-readonly" style="text-transform: none;">{{if .ScopeMode}}{{.ScopeMode}}{{else}}read_only{{end}}</span>
+              </div>
+              <div class="btn-row">
+                <button type="button" class="btn btn-sm btn-outline" onclick="openSetupModal('{{.TemplateID}}', '{{.ID}}')">Tutorial &amp; Edit</button>
+                <form method="POST" action="/api/connections/{{.ID}}/disconnect" style="margin: 0; display: inline;">
+                  <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                  <button type="submit" class="btn btn-sm btn-danger">Remove</button>
+                </form>
+              </div>
             {{else}}
               <div class="scope-select-row">
                 <label for="scope-{{.ID}}" style="color: var(--text-muted);">Scope:</label>
-                <select id="scope-{{.ID}}" name="scope" class="form-select" style="font-size: 0.82rem; padding: 4px 8px;">
+                <select id="scope-{{.ID}}" name="scope" class="form-select" style="font-size: 0.82rem; padding: 4px 8px; width: auto;">
                   <option value="read_only" {{if or (eq .ScopeMode "read_only") (not .ScopeMode)}}selected{{end}}>Read Only (Recommended)</option>
                   <option value="full_access" {{if eq .ScopeMode "full_access"}}selected{{end}}>Full Access (Read + Write)</option>
                 </select>
               </div>
 
               <div class="btn-row">
+                {{if .NeedsConfig}}
+                <button type="button" class="btn btn-sm btn-primary" onclick="openSetupModal('{{.ID}}')">
+                  {{if .Connected}}Reconnect{{else}}Connect{{end}}
+                </button>
+                {{else}}
                 <button type="button" class="btn btn-sm btn-primary" onclick="openConnectPopup('{{.ID}}')">
                   {{if .Connected}}Reconnect{{else}}Connect{{end}}
                 </button>
+                {{end}}
+
+                <button type="button" class="btn btn-sm btn-outline" onclick="openSetupModal('{{.ID}}')">
+                  Tutorial &amp; Configure
+                </button>
+
                 {{if .Connected}}
                 <form method="POST" action="/api/connections/{{.ID}}/disconnect" style="margin: 0; display: inline;">
                   <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
@@ -127,9 +169,435 @@
     </section>
   </main>
 
+  <!-- Modal 1: Connector Catalog Picker -->
+  <div class="modal-backdrop" id="catalog-modal" onclick="onBackdropClick(event, 'catalog-modal')">
+    <div class="modal-dialog modal-dialog-lg">
+      <div class="modal-header">
+        <h3 class="modal-title">Connector Catalog</h3>
+        <button type="button" class="modal-close" onclick="closeModal('catalog-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group" style="margin-bottom: 14px;">
+          <input type="text" id="catalog-search" class="form-input" placeholder="Search connectors (Slack, Notion, Linear, Custom MCP...)" oninput="filterCatalog()">
+        </div>
+        <div class="category-pills">
+          <button type="button" class="category-pill active" onclick="setCatalogCategory('all', this)">All</button>
+          <button type="button" class="category-pill" onclick="setCatalogCategory('mcp', this)">MCP Servers</button>
+          <button type="button" class="category-pill" onclick="setCatalogCategory('dev', this)">Dev &amp; Ops</button>
+          <button type="button" class="category-pill" onclick="setCatalogCategory('prod', this)">Productivity</button>
+          <button type="button" class="category-pill" onclick="setCatalogCategory('custom', this)">Custom</button>
+        </div>
+        <div class="catalog-grid" id="catalog-grid">
+          <!-- 1. GitHub -->
+          <div class="catalog-card" data-category="dev" data-name="github" onclick="selectConnectorTemplate('github')">
+            <div class="catalog-icon">GH</div>
+            <div class="catalog-info">
+              <div class="catalog-name">GitHub <span class="badge badge-disconnected">OAuth / PAT</span></div>
+              <div class="catalog-desc">Repository issues, code search, and PRs via OAuth 2.0 or Personal Access Token.</div>
+              <div class="catalog-action">Select &amp; View Tutorial &rarr;</div>
+            </div>
+          </div>
+          <!-- 2. Jira -->
+          <div class="catalog-card" data-category="dev prod" data-name="atlassian jira" onclick="selectConnectorTemplate('jira')">
+            <div class="catalog-icon">JR</div>
+            <div class="catalog-info">
+              <div class="catalog-name">Atlassian Jira <span class="badge badge-disconnected">3LO OAuth</span></div>
+              <div class="catalog-desc">Jira workspace project and issue tracking via Atlassian 3LO OAuth 2.0.</div>
+              <div class="catalog-action">Select &amp; View Tutorial &rarr;</div>
+            </div>
+          </div>
+          <!-- 3. Linear -->
+          <div class="catalog-card" data-category="mcp prod" data-name="linear" onclick="selectConnectorTemplate('linear')">
+            <div class="catalog-icon">LN</div>
+            <div class="catalog-info">
+              <div class="catalog-name">Linear <span class="badge badge-adc">Remote MCP</span></div>
+              <div class="catalog-desc">Linear issues and project sync via Remote MCP at mcp.linear.app + API Key.</div>
+              <div class="catalog-action">Select &amp; View Tutorial &rarr;</div>
+            </div>
+          </div>
+          <!-- 4. Notion -->
+          <div class="catalog-card" data-category="prod" data-name="notion" onclick="selectConnectorTemplate('notion')">
+            <div class="catalog-icon">NT</div>
+            <div class="catalog-info">
+              <div class="catalog-name">Notion <span class="badge badge-adc">REST / MCP</span></div>
+              <div class="catalog-desc">Workspaces, databases, and pages via Notion API + Integration Secret.</div>
+              <div class="catalog-action">Select &amp; View Tutorial &rarr;</div>
+            </div>
+          </div>
+          <!-- 5. Slack -->
+          <div class="catalog-card" data-category="prod" data-name="slack" onclick="selectConnectorTemplate('slack')">
+            <div class="catalog-icon">SL</div>
+            <div class="catalog-info">
+              <div class="catalog-name">Slack <span class="badge badge-adc">REST / MCP</span></div>
+              <div class="catalog-desc">Workspace channels, message search, and posting via Slack Bot Token.</div>
+              <div class="catalog-action">Select &amp; View Tutorial &rarr;</div>
+            </div>
+          </div>
+          <!-- 6. Cloudflare -->
+          <div class="catalog-card" data-category="mcp dev" data-name="cloudflare" onclick="selectConnectorTemplate('cloudflare')">
+            <div class="catalog-icon">CF</div>
+            <div class="catalog-info">
+              <div class="catalog-name">Cloudflare <span class="badge badge-adc">Remote MCP</span></div>
+              <div class="catalog-desc">DNS, Workers, and KV management via Cloudflare Remote MCP / API Token.</div>
+              <div class="catalog-action">Select &amp; View Tutorial &rarr;</div>
+            </div>
+          </div>
+          <!-- 7. Sentry -->
+          <div class="catalog-card" data-category="mcp dev" data-name="sentry" onclick="selectConnectorTemplate('sentry')">
+            <div class="catalog-icon">SN</div>
+            <div class="catalog-info">
+              <div class="catalog-name">Sentry <span class="badge badge-adc">Remote MCP</span></div>
+              <div class="catalog-desc">Application error issues, stack traces, and releases via Sentry MCP / Auth Token.</div>
+              <div class="catalog-action">Select &amp; View Tutorial &rarr;</div>
+            </div>
+          </div>
+          <!-- 8. Supabase -->
+          <div class="catalog-card" data-category="mcp dev" data-name="supabase" onclick="selectConnectorTemplate('supabase')">
+            <div class="catalog-icon">SB</div>
+            <div class="catalog-info">
+              <div class="catalog-name">Supabase <span class="badge badge-adc">Remote MCP</span></div>
+              <div class="catalog-desc">Postgres tables, storage, and auth via Supabase Remote MCP + PAT.</div>
+              <div class="catalog-action">Select &amp; View Tutorial &rarr;</div>
+            </div>
+          </div>
+          <!-- 9. Custom Remote MCP -->
+          <div class="catalog-card" data-category="custom mcp" data-name="custom remote mcp server" onclick="selectConnectorTemplate('custom_mcp')">
+            <div class="catalog-icon">MCP</div>
+            <div class="catalog-info">
+              <div class="catalog-name">Custom Remote MCP Server <span class="badge badge-custom">Custom</span></div>
+              <div class="catalog-desc">Streamable HTTP JSON-RPC /mcp upstream endpoint + optional Bearer Token.</div>
+              <div class="catalog-action">Select &amp; View Tutorial &rarr;</div>
+            </div>
+          </div>
+          <!-- 10. Custom REST API -->
+          <div class="catalog-card" data-category="custom" data-name="custom rest api connector" onclick="selectConnectorTemplate('custom_api')">
+            <div class="catalog-icon">API</div>
+            <div class="catalog-info">
+              <div class="catalog-name">Custom REST API Connector <span class="badge badge-custom">Custom</span></div>
+              <div class="catalog-desc">Any enterprise HTTPS REST API endpoint + custom Authorization Header.</div>
+              <div class="catalog-action">Select &amp; View Tutorial &rarr;</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal 2: Step-by-Step Setup Tutorial & Configuration -->
+  <div class="modal-backdrop" id="setup-modal" onclick="onBackdropClick(event, 'setup-modal')">
+    <div class="modal-dialog modal-dialog-lg" id="tutorial-modal">
+      <div class="modal-header">
+        <h3 class="modal-title" id="setup-modal-title">Connector Setup &amp; Configuration</h3>
+        <button type="button" class="modal-close" onclick="closeModal('setup-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="setup-alert" style="display: none;" class="alert">
+          <span id="setup-alert-text"></span>
+        </div>
+
+        <!-- GitHub Setup Form & Tutorial -->
+        <div id="setup-pane-github" style="display: none;">
+          <div class="tab-bar">
+            <button type="button" class="tab-btn active" id="tab-gh-pat" onclick="switchGHTab('pat')">Quick Connect (Personal Access Token)</button>
+            <button type="button" class="tab-btn" id="tab-gh-oauth" onclick="switchGHTab('oauth')">OAuth 2.0 App (Popup Flow)</button>
+          </div>
+
+          <div id="pane-gh-pat" class="tab-pane active">
+            <div class="tutorial-steps">
+              <div class="tutorial-step">
+                <div class="step-num">1</div>
+                <div class="step-body">
+                  <div class="step-title">Generate GitHub Personal Access Token</div>
+                  <div class="step-text">Open <a href="https://github.com/settings/tokens/new" target="_blank" rel="noopener noreferrer">github.com/settings/tokens/new</a> in a new tab.</div>
+                </div>
+              </div>
+              <div class="tutorial-step">
+                <div class="step-num">2</div>
+                <div class="step-body">
+                  <div class="step-title">Select Scopes</div>
+                  <div class="step-text">Select <code>repo</code> and <code>read:user</code> scopes (or minimal scopes for read-only repository inspection).</div>
+                </div>
+              </div>
+              <div class="tutorial-step">
+                <div class="step-num">3</div>
+                <div class="step-body">
+                  <div class="step-title">Paste Token &amp; Connect</div>
+                  <div class="step-text">Paste the generated token below and click <strong>Save &amp; Connect GitHub</strong>.</div>
+                </div>
+              </div>
+            </div>
+
+            <form id="form-gh-pat" onsubmit="submitGitHubPAT(event)">
+              <div class="form-group">
+                <label for="gh-pat-token">GitHub Personal Access Token</label>
+                <input type="password" id="gh-pat-token" class="form-input" placeholder="YOUR_GITHUB_PAT" required autocomplete="off">
+              </div>
+              <div class="form-group">
+                <label for="gh-pat-scope">Scope Mode</label>
+                <select id="gh-pat-scope" class="form-select">
+                  <option value="read_only">Read Only (Recommended)</option>
+                  <option value="full_access">Full Access (Read + Write)</option>
+                </select>
+              </div>
+              <div class="modal-footer" style="padding-left: 0; padding-right: 0;">
+                <button type="button" class="btn btn-outline" onclick="closeModal('setup-modal')">Cancel</button>
+                <button type="submit" class="btn btn-primary" id="btn-save-gh-pat">Save &amp; Connect GitHub</button>
+              </div>
+            </form>
+          </div>
+
+          <div id="pane-gh-oauth" class="tab-pane">
+            <div class="tutorial-steps">
+              <div class="tutorial-step">
+                <div class="step-num">1</div>
+                <div class="step-body">
+                  <div class="step-title">Register GitHub OAuth App</div>
+                  <div class="step-text">Open <a href="https://github.com/settings/applications/new" target="_blank" rel="noopener noreferrer">github.com/settings/applications/new</a>.</div>
+                </div>
+              </div>
+              <div class="tutorial-step">
+                <div class="step-num">2</div>
+                <div class="step-body">
+                  <div class="step-title">Set Application URLs</div>
+                  <div class="step-text">Set <strong>Homepage URL</strong> to your service URL:</div>
+                  <div class="copy-snippet-box">
+                    <span class="copy-snippet-code" id="gh-homepage-snippet">{{.ServiceURL}}</span>
+                    <button type="button" class="btn btn-sm btn-outline" onclick="copyFromElement('gh-homepage-snippet', this)">Copy</button>
+                  </div>
+                  <div class="step-text" style="margin-top: 6px;">Set <strong>Authorization callback URL</strong> to:</div>
+                  <div class="copy-snippet-box">
+                    <span class="copy-snippet-code" id="gh-callback-snippet">{{.ServiceURL}}/oauth/callback/github</span>
+                    <button type="button" class="btn btn-sm btn-outline" onclick="copyFromElement('gh-callback-snippet', this)">Copy</button>
+                  </div>
+                </div>
+              </div>
+              <div class="tutorial-step">
+                <div class="step-num">3</div>
+                <div class="step-body">
+                  <div class="step-title">Paste Client Credentials</div>
+                  <div class="step-text">Generate a Client Secret and paste both values below.</div>
+                </div>
+              </div>
+            </div>
+
+            <form id="form-gh-oauth" onsubmit="submitOAuthConfig(event, 'github')">
+              <div class="form-group">
+                <label for="gh-client-id">Client ID</label>
+                <input type="text" id="gh-client-id" class="form-input" placeholder="Ov23li..." required autocomplete="off">
+              </div>
+              <div class="form-group">
+                <label for="gh-client-secret">Client Secret</label>
+                <input type="password" id="gh-client-secret" class="form-input" placeholder="Client secret..." required autocomplete="off">
+              </div>
+              <div class="form-group">
+                <label for="gh-allowed-repos">Allowed Repositories (Optional, comma-separated)</label>
+                <input type="text" id="gh-allowed-repos" class="form-input" placeholder="org/repo1, org/repo2 (leave blank for all)">
+              </div>
+              <div class="modal-footer" style="padding-left: 0; padding-right: 0;">
+                <button type="button" class="btn btn-outline" onclick="closeModal('setup-modal')">Cancel</button>
+                <button type="button" class="btn btn-secondary" onclick="saveOAuthConfigOnly('github')">Save Configuration</button>
+                <button type="submit" class="btn btn-primary" id="btn-save-gh-oauth">Save &amp; Launch OAuth Connect</button>
+              </div>
+            </form>
+          </div>
+        </div>
+
+        <!-- Jira Setup Form & Tutorial -->
+        <div id="setup-pane-jira" style="display: none;">
+          <div class="tutorial-steps">
+            <div class="tutorial-step">
+              <div class="step-num">1</div>
+              <div class="step-body">
+                <div class="step-title">Open Atlassian Developer Console</div>
+                <div class="step-text">Visit <a href="https://developer.atlassian.com/console/myapps/" target="_blank" rel="noopener noreferrer">developer.atlassian.com/console/myapps/</a>.</div>
+              </div>
+            </div>
+            <div class="tutorial-step">
+              <div class="step-num">2</div>
+              <div class="step-body">
+                <div class="step-title">Create OAuth 2.0 (3LO) Integration</div>
+                <div class="step-text">Click <strong>Create &rarr; OAuth 2.0 integration</strong> and name it <code>Spark MCP Gateway</code>.</div>
+              </div>
+            </div>
+            <div class="tutorial-step">
+              <div class="step-num">3</div>
+              <div class="step-body">
+                <div class="step-title">Configure Permissions &amp; Callback</div>
+                <div class="step-text">Under <strong>Permissions &rarr; Jira API</strong>, add <code>read:jira-work</code> and <code>read:jira-user</code>. Under <strong>Authorization</strong>, set Callback URL:</div>
+                <div class="copy-snippet-box">
+                  <span class="copy-snippet-code" id="jira-callback-snippet">{{.ServiceURL}}/oauth/callback/jira</span>
+                  <button type="button" class="btn btn-sm btn-outline" onclick="copyFromElement('jira-callback-snippet', this)">Copy</button>
+                </div>
+              </div>
+            </div>
+            <div class="tutorial-step">
+              <div class="step-num">4</div>
+              <div class="step-body">
+                <div class="step-title">Save &amp; Connect</div>
+                <div class="step-text">Copy your Client ID and Secret from <strong>Settings</strong>, paste below, and connect.</div>
+              </div>
+            </div>
+          </div>
+
+          <form id="form-jira-oauth" onsubmit="submitOAuthConfig(event, 'jira')">
+            <div class="form-group">
+              <label for="jira-client-id">Atlassian Client ID</label>
+              <input type="text" id="jira-client-id" class="form-input" placeholder="Atlassian client ID..." required autocomplete="off">
+            </div>
+            <div class="form-group">
+              <label for="jira-client-secret">Atlassian Client Secret</label>
+              <input type="password" id="jira-client-secret" class="form-input" placeholder="Atlassian client secret..." required autocomplete="off">
+            </div>
+            <div class="modal-footer" style="padding-left: 0; padding-right: 0;">
+              <button type="button" class="btn btn-outline" onclick="closeModal('setup-modal')">Cancel</button>
+              <button type="button" class="btn btn-secondary" onclick="saveOAuthConfigOnly('jira')">Save Configuration</button>
+              <button type="submit" class="btn btn-primary" id="btn-save-jira-oauth">Save &amp; Launch Jira Connect</button>
+            </div>
+          </form>
+        </div>
+
+        <!-- Custom / Curated Connector Form & Tutorial -->
+        <div id="setup-pane-custom" style="display: none;">
+          <div class="tutorial-steps" id="custom-tutorial-steps">
+            <!-- Dynamically populated per template -->
+          </div>
+
+          <form id="form-custom-connector" onsubmit="submitCustomConnector(event)">
+            <input type="hidden" id="custom-template-id" value="">
+            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;">
+              <div class="form-group">
+                <label for="custom-name">Connector Name</label>
+                <input type="text" id="custom-name" class="form-input" required>
+              </div>
+              <div class="form-group">
+                <label for="custom-slug">Slug Identifier</label>
+                <input type="text" id="custom-slug" class="form-input" required pattern="[a-z0-9_-]+">
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="custom-description">Description</label>
+              <input type="text" id="custom-description" class="form-input">
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;">
+              <div class="form-group">
+                <label for="custom-type">Connector Type</label>
+                <select id="custom-type" class="form-select">
+                  <option value="remote_mcp">Remote MCP Server (/mcp JSON-RPC)</option>
+                  <option value="rest_api">REST API Endpoint</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="custom-scope">Scope Mode</label>
+                <select id="custom-scope" class="form-select">
+                  <option value="read_only">Read Only (Recommended)</option>
+                  <option value="full_access">Full Access</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="custom-endpoint">Endpoint URL</label>
+              <input type="url" id="custom-endpoint" class="form-input" placeholder="https://..." required>
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 2fr; gap: 12px;">
+              <div class="form-group">
+                <label for="custom-auth-header">Auth Header</label>
+                <input type="text" id="custom-auth-header" class="form-input" value="Authorization" required>
+              </div>
+              <div class="form-group">
+                <label for="custom-auth-token">Bearer / API Token</label>
+                <input type="password" id="custom-auth-token" class="form-input" placeholder="Token secret..." autocomplete="off">
+              </div>
+            </div>
+            <div class="modal-footer" style="padding-left: 0; padding-right: 0;">
+              <button type="button" class="btn btn-outline" onclick="closeModal('setup-modal')">Cancel</button>
+              <button type="submit" class="btn btn-primary" id="btn-save-custom">Save &amp; Enable Connector</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal 3: Gemini Spark / Client Setup Guide Modal -->
+  <div class="modal-backdrop" id="client-guide-modal" onclick="onBackdropClick(event, 'client-guide-modal')">
+    <div class="modal-dialog modal-dialog-lg">
+      <div class="modal-header">
+        <h3 class="modal-title">Gemini Spark &amp; MCP Client Setup Guide</h3>
+        <button type="button" class="modal-close" onclick="closeModal('client-guide-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="tutorial-steps">
+          <div class="tutorial-step">
+            <div class="step-num">1</div>
+            <div class="step-body">
+              <div class="step-title">Direct-Link MCP Endpoint</div>
+              <div class="step-text">Use this HTTPS endpoint in Google Gemini, Cursor, or Claude Desktop:</div>
+              <div class="copy-snippet-box">
+                <span class="copy-snippet-code" id="guide-mcp-snippet">{{.MCPEndpoint}}</span>
+                <button type="button" class="btn btn-sm btn-outline" onclick="copyFromElement('guide-mcp-snippet', this)">Copy</button>
+              </div>
+            </div>
+          </div>
+          <div class="tutorial-step">
+            <div class="step-num">2</div>
+            <div class="step-body">
+              <div class="step-title">Google Gemini Connected Apps</div>
+              <div class="step-text">
+                In <strong>Google Gemini</strong> (<a href="https://gemini.google.com" target="_blank" rel="noopener noreferrer">gemini.google.com</a>) &rarr; <strong>Settings</strong> &rarr; <strong>Connected Apps / Extensions</strong> &rarr; <strong>Add Custom MCP Server</strong>, paste the endpoint URL above.
+                Dynamic Client Registration (RFC 7591) authenticates via Google OIDC automatically.
+              </div>
+            </div>
+          </div>
+          <div class="tutorial-step">
+            <div class="step-num">3</div>
+            <div class="step-body">
+              <div class="step-title">Claude Desktop &amp; Cursor Configuration</div>
+              <div class="step-text">In <code>claude_desktop_config.json</code> or Cursor MCP settings, add:</div>
+              <div class="copy-snippet-box">
+                <span class="copy-snippet-code" id="claude-json-snippet">{"mcpServers": {"spark-gateway": {"url": "{{.MCPEndpoint}}", "transport": "http"}}}</span>
+                <button type="button" class="btn btn-sm btn-outline" onclick="copyFromElement('claude-json-snippet', this)">Copy JSON</button>
+              </div>
+            </div>
+          </div>
+          <div class="tutorial-step">
+            <div class="step-num">4</div>
+            <div class="step-body">
+              <div class="step-title">Manual Credentials Fallback (Static OAuth Client)</div>
+              <div class="step-text">
+                If your client or environment prompts for manual OAuth credentials (Client ID &amp; Secret), generate a dedicated static OAuth credential below:
+              </div>
+              <div style="margin-top: 10px;">
+                <button type="button" class="btn btn-sm btn-secondary" id="btn-gen-static-client" onclick="generateStaticOAuthClient()">Generate Static OAuth Client ID &amp; Secret</button>
+              </div>
+              <div id="static-client-result" style="display: none; margin-top: 12px; background: #080d16; border: 1px solid #1f2c42; border-radius: var(--radius-sm); padding: 12px;">
+                <div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 4px;">Client ID:</div>
+                <div class="copy-snippet-box" style="margin-bottom: 8px;">
+                  <span class="copy-snippet-code" id="static-client-id-val"></span>
+                  <button type="button" class="btn btn-sm btn-outline" onclick="copyFromElement('static-client-id-val', this)">Copy</button>
+                </div>
+                <div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 4px;">Client Secret:</div>
+                <div class="copy-snippet-box">
+                  <span class="copy-snippet-code" id="static-client-secret-val"></span>
+                  <button type="button" class="btn btn-sm btn-outline" onclick="copyFromElement('static-client-secret-val', this)">Copy</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-primary" onclick="closeModal('client-guide-modal')">Done</button>
+      </div>
+    </div>
+  </div>
+
   <script>
+    var CSRF_TOKEN = document.getElementById('dashboard-csrf-token').value;
+    var SERVICE_URL = document.getElementById('service-url-val').getAttribute('data-url') || '';
+
     function copyMCPEndpoint() {
-      var text = {{.MCPEndpoint}};
+      var el = document.getElementById('mcp-endpoint-val');
+      var text = el ? el.innerText.trim() : '';
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(text).then(function() {
           var btn = document.getElementById('copy-endpoint-btn');
@@ -142,10 +610,426 @@
       }
     }
 
+    function copyText(str, btn) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(str).then(function() {
+          if (btn) {
+            var orig = btn.innerText;
+            btn.innerText = 'Copied!';
+            setTimeout(function() { btn.innerText = orig; }, 2000);
+          }
+        });
+      }
+    }
+
+    function copyFromElement(elemId, btn) {
+      var el = document.getElementById(elemId);
+      if (el) {
+        copyText(el.innerText.trim(), btn);
+      }
+    }
+
     function openConnectPopup(id) {
       var sel = document.getElementById('scope-' + id);
       var mode = sel ? sel.value : 'read_only';
       window.open('/oauth/connect/' + encodeURIComponent(id) + '?mode=' + encodeURIComponent(mode), 'spark_oauth_popup', 'width=620,height=720');
+    }
+
+    function openCatalogModal() {
+      var modal = document.getElementById('catalog-modal');
+      if (modal) modal.classList.add('active');
+    }
+
+    function openGeminiGuideModal() { openClientGuideModal(); }
+    function openClientGuideModal() {
+      var modal = document.getElementById('client-guide-modal');
+      if (modal) modal.classList.add('active');
+    }
+
+    function closeModal(id) {
+      var modal = document.getElementById(id);
+      if (modal) modal.classList.remove('active');
+    }
+
+    function onBackdropClick(event, id) {
+      if (event.target && event.target.id === id) {
+        closeModal(id);
+      }
+    }
+
+    document.addEventListener('keydown', function(event) {
+      if (event.key === 'Escape') {
+        closeModal('catalog-modal');
+        closeModal('setup-modal');
+        closeModal('client-guide-modal');
+      }
+    });
+
+    function setCatalogCategory(cat, btn) {
+      var pills = document.querySelectorAll('.category-pill');
+      for (var i = 0; i < pills.length; i++) pills[i].classList.remove('active');
+      btn.classList.add('active');
+
+      var cards = document.querySelectorAll('.catalog-card');
+      for (var j = 0; j < cards.length; j++) {
+        var cardCat = cards[j].getAttribute('data-category') || '';
+        if (cat === 'all' || cardCat.indexOf(cat) !== -1) {
+          cards[j].style.display = 'flex';
+        } else {
+          cards[j].style.display = 'none';
+        }
+      }
+    }
+
+    function filterCatalog() {
+      var input = document.getElementById('catalog-search');
+      var q = input ? input.value.toLowerCase().trim() : '';
+      var cards = document.querySelectorAll('.catalog-card');
+      for (var i = 0; i < cards.length; i++) {
+        var name = cards[i].getAttribute('data-name') || '';
+        var text = cards[i].innerText.toLowerCase();
+        if (!q || name.indexOf(q) !== -1 || text.indexOf(q) !== -1) {
+          cards[i].style.display = 'flex';
+        } else {
+          cards[i].style.display = 'none';
+        }
+      }
+    }
+
+    var TEMPLATE_DEFAULTS = {
+      linear: {
+        name: 'Linear',
+        slug: 'linear',
+        desc: 'Linear issues, cycles, and project tracking via Remote MCP',
+        type: 'remote_mcp',
+        endpoint: 'https://mcp.linear.app/mcp',
+        authHeader: 'Authorization',
+        portalUrl: 'https://linear.app/settings/api',
+        portalName: 'Linear Settings &rarr; API &rarr; Personal API Keys'
+      },
+      notion: {
+        name: 'Notion',
+        slug: 'notion',
+        desc: 'Notion databases, workspace documents, and page search',
+        type: 'rest_api',
+        endpoint: 'https://api.notion.com',
+        authHeader: 'Authorization',
+        portalUrl: 'https://www.notion.so/profile/integrations',
+        portalName: 'Notion Developers &rarr; My Integrations'
+      },
+      slack: {
+        name: 'Slack',
+        slug: 'slack',
+        desc: 'Slack channels, member search, and thread message posting',
+        type: 'rest_api',
+        endpoint: 'https://slack.com/api',
+        authHeader: 'Authorization',
+        portalUrl: 'https://api.slack.com/apps',
+        portalName: 'Slack API Console &rarr; Bot User OAuth Token'
+      },
+      cloudflare: {
+        name: 'Cloudflare',
+        slug: 'cloudflare',
+        desc: 'Cloudflare DNS, Workers, and KV management API',
+        type: 'remote_mcp',
+        endpoint: 'https://api.cloudflare.com/client/v4',
+        authHeader: 'Authorization',
+        portalUrl: 'https://dash.cloudflare.com/profile/api-tokens',
+        portalName: 'Cloudflare Dashboard &rarr; API Tokens'
+      },
+      sentry: {
+        name: 'Sentry',
+        slug: 'sentry',
+        desc: 'Sentry application issue monitoring and stack trace search',
+        type: 'remote_mcp',
+        endpoint: 'https://mcp.sentry.dev/mcp',
+        authHeader: 'Authorization',
+        portalUrl: 'https://sentry.io/settings/account/api/auth-tokens/',
+        portalName: 'Sentry Account &rarr; Auth Tokens'
+      },
+      supabase: {
+        name: 'Supabase',
+        slug: 'supabase',
+        desc: 'Supabase Postgres tables, storage buckets, and auth administration',
+        type: 'remote_mcp',
+        endpoint: 'https://mcp.supabase.com/mcp',
+        authHeader: 'Authorization',
+        portalUrl: 'https://supabase.com/dashboard/account/tokens',
+        portalName: 'Supabase Dashboard &rarr; Access Tokens'
+      },
+      custom_mcp: {
+        name: 'Custom Remote MCP Server',
+        slug: 'custom-mcp',
+        desc: 'HTTP JSON-RPC /mcp upstream microservice',
+        type: 'remote_mcp',
+        endpoint: 'https://',
+        authHeader: 'Authorization',
+        portalUrl: '',
+        portalName: ''
+      },
+      custom_api: {
+        name: 'Custom REST API Connector',
+        slug: 'custom-api',
+        desc: 'Enterprise HTTPS REST API microservice',
+        type: 'rest_api',
+        endpoint: 'https://',
+        authHeader: 'Authorization',
+        portalUrl: '',
+        portalName: ''
+      }
+    };
+
+    function selectConnectorTemplate(templateId) {
+      closeModal('catalog-modal');
+      openSetupModal(templateId);
+    }
+
+    function openSetupModal(templateId, customId) {
+      var modal = document.getElementById('setup-modal');
+      var alertBox = document.getElementById('setup-alert');
+      if (alertBox) alertBox.style.display = 'none';
+
+      document.getElementById('setup-pane-github').style.display = 'none';
+      document.getElementById('setup-pane-jira').style.display = 'none';
+      document.getElementById('setup-pane-custom').style.display = 'none';
+
+      var title = document.getElementById('setup-modal-title');
+
+      if (templateId === 'github') {
+        if (title) title.innerText = 'Configure GitHub Connector';
+        document.getElementById('setup-pane-github').style.display = 'block';
+      } else if (templateId === 'jira') {
+        if (title) title.innerText = 'Configure Atlassian Jira Connector';
+        document.getElementById('setup-pane-jira').style.display = 'block';
+      } else {
+        var tpl = TEMPLATE_DEFAULTS[templateId] || TEMPLATE_DEFAULTS.custom_mcp;
+        if (title) title.innerText = 'Configure ' + tpl.name;
+        document.getElementById('setup-pane-custom').style.display = 'block';
+
+        document.getElementById('custom-template-id').value = templateId;
+        document.getElementById('custom-name').value = tpl.name;
+        document.getElementById('custom-slug').value = customId ? customId.replace('custom:', '') : tpl.slug;
+        document.getElementById('custom-description').value = tpl.desc;
+        document.getElementById('custom-type').value = tpl.type;
+        document.getElementById('custom-endpoint').value = tpl.endpoint;
+        document.getElementById('custom-auth-header').value = tpl.authHeader;
+        document.getElementById('custom-auth-token').value = '';
+
+        var stepsContainer = document.getElementById('custom-tutorial-steps');
+        if (stepsContainer) {
+          var portalHtml = '';
+          if (tpl.portalUrl) {
+            portalHtml = '<div class="tutorial-step"><div class="step-num">1</div><div class="step-body"><div class="step-title">Generate API Key / Token</div><div class="step-text">Open <a href="' + tpl.portalUrl + '" target="_blank" rel="noopener noreferrer">' + tpl.portalName + '</a> and create a token.</div></div></div>';
+          }
+          stepsContainer.innerHTML = portalHtml +
+            '<div class="tutorial-step"><div class="step-num">' + (tpl.portalUrl ? '2' : '1') + '</div><div class="step-body"><div class="step-title">Configure Endpoint &amp; Credentials</div><div class="step-text">Verify the upstream endpoint URL and paste your secret token below.</div></div></div>';
+        }
+      }
+
+      if (modal) modal.classList.add('active');
+    }
+
+    function switchGHTab(tab) {
+      var patTab = document.getElementById('tab-gh-pat');
+      var oauthTab = document.getElementById('tab-gh-oauth');
+      var patPane = document.getElementById('pane-gh-pat');
+      var oauthPane = document.getElementById('pane-gh-oauth');
+
+      if (tab === 'pat') {
+        patTab.classList.add('active');
+        oauthTab.classList.remove('active');
+        patPane.classList.add('active');
+        oauthPane.classList.remove('active');
+      } else {
+        patTab.classList.remove('active');
+        oauthTab.classList.add('active');
+        patPane.classList.remove('active');
+        oauthPane.classList.add('active');
+      }
+    }
+
+    function showSetupAlert(msg, isError) {
+      var box = document.getElementById('setup-alert');
+      var text = document.getElementById('setup-alert-text');
+      if (box && text) {
+        text.innerText = msg;
+        box.className = 'alert ' + (isError ? 'alert-error' : 'alert-success');
+        box.style.display = 'flex';
+      }
+    }
+
+    function submitGitHubPAT(e) {
+      e.preventDefault();
+      var token = document.getElementById('gh-pat-token').value.trim();
+      var scope = document.getElementById('gh-pat-scope').value;
+
+      fetch('/api/connectors/github/pat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          csrf_token: CSRF_TOKEN,
+          access_token: token,
+          scope_mode: scope
+        })
+      })
+      .then(function(res) {
+        return res.json().then(function(data) {
+          if (!res.ok) throw new Error(data.error_description || data.error || 'Failed to save GitHub PAT');
+          return data;
+        });
+      })
+      .then(function() {
+        window.location.reload();
+      })
+      .catch(function(err) {
+        showSetupAlert(err.message, true);
+      });
+    }
+
+    function saveOAuthConfigOnly(app) {
+      var clientId = (app === 'github' ? document.getElementById('gh-client-id') : document.getElementById('jira-client-id')).value.trim();
+      var clientSecret = (app === 'github' ? document.getElementById('gh-client-secret') : document.getElementById('jira-client-secret')).value.trim();
+      var repos = app === 'github' ? document.getElementById('gh-allowed-repos').value.trim() : '';
+
+      if (!clientId || !clientSecret) {
+        showSetupAlert('Client ID and Client Secret are required', true);
+        return;
+      }
+
+      fetch('/api/connectors/' + encodeURIComponent(app) + '/oauth-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          csrf_token: CSRF_TOKEN,
+          client_id: clientId,
+          client_secret: clientSecret,
+          allowed_write_repos: repos
+        })
+      })
+      .then(function(res) {
+        return res.json().then(function(data) {
+          if (!res.ok) throw new Error(data.error_description || data.error || 'Failed to save OAuth configuration');
+          return data;
+        });
+      })
+      .then(function() {
+        showSetupAlert('OAuth credentials saved successfully.', false);
+      })
+      .catch(function(err) {
+        showSetupAlert(err.message, true);
+      });
+    }
+
+    function submitOAuthConfig(e, app) {
+      e.preventDefault();
+      var clientId = (app === 'github' ? document.getElementById('gh-client-id') : document.getElementById('jira-client-id')).value.trim();
+      var clientSecret = (app === 'github' ? document.getElementById('gh-client-secret') : document.getElementById('jira-client-secret')).value.trim();
+      var repos = app === 'github' ? document.getElementById('gh-allowed-repos').value.trim() : '';
+
+      fetch('/api/connectors/' + encodeURIComponent(app) + '/oauth-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          csrf_token: CSRF_TOKEN,
+          client_id: clientId,
+          client_secret: clientSecret,
+          allowed_write_repos: repos
+        })
+      })
+      .then(function(res) {
+        return res.json().then(function(data) {
+          if (!res.ok) throw new Error(data.error_description || data.error || 'Failed to save OAuth configuration');
+          return data;
+        });
+      })
+      .then(function() {
+        closeModal('setup-modal');
+        openConnectPopup(app);
+      })
+      .catch(function(err) {
+        showSetupAlert(err.message, true);
+      });
+    }
+
+    function submitCustomConnector(e) {
+      e.preventDefault();
+      var templateId = document.getElementById('custom-template-id').value;
+      var name = document.getElementById('custom-name').value.trim();
+      var slug = document.getElementById('custom-slug').value.trim();
+      var desc = document.getElementById('custom-description').value.trim();
+      var connType = document.getElementById('custom-type').value;
+      var scope = document.getElementById('custom-scope').value;
+      var endpoint = document.getElementById('custom-endpoint').value.trim();
+      var authHeader = document.getElementById('custom-auth-header').value.trim();
+      var authToken = document.getElementById('custom-auth-token').value.trim();
+
+      fetch('/api/connectors/custom', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          csrf_token: CSRF_TOKEN,
+          slug: slug,
+          template_id: templateId,
+          name: name,
+          description: desc,
+          connector_type: connType,
+          endpoint_url: endpoint,
+          auth_token: authToken,
+          auth_header: authHeader,
+          scope_mode: scope
+        })
+      })
+      .then(function(res) {
+        return res.json().then(function(data) {
+          if (!res.ok) throw new Error(data.error_description || data.error || 'Failed to save custom connector');
+          return data;
+        });
+      })
+      .then(function() {
+        window.location.reload();
+      })
+      .catch(function(err) {
+        showSetupAlert(err.message, true);
+      });
+    }
+
+    function generateStaticOAuthClient() {
+      var btn = document.getElementById('btn-gen-static-client');
+      if (btn) btn.disabled = true;
+
+      fetch('/api/oauth/clients/static', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          csrf_token: CSRF_TOKEN,
+          client_name: 'Gemini Spark Connector'
+        })
+      })
+      .then(function(res) {
+        return res.json().then(function(data) {
+          if (!res.ok) throw new Error(data.error || 'Failed to generate static client');
+          return data;
+        });
+      })
+      .then(function(data) {
+        var resBox = document.getElementById('static-client-result');
+        var idVal = document.getElementById('static-client-id-val');
+        var secretVal = document.getElementById('static-client-secret-val');
+        if (idVal) idVal.innerText = data.client_id || '';
+        if (secretVal) secretVal.innerText = data.client_secret || '';
+        if (resBox) resBox.style.display = 'block';
+      })
+      .catch(function(err) {
+        alert(err.message);
+      })
+      .finally(function() {
+        if (btn) btn.disabled = false;
+      });
     }
 
     window.addEventListener('message', function(event) {

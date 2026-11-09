@@ -58,9 +58,10 @@ func main() {
 	}
 
 	// Provider token refresh handler for distributed TokenVault
+	var broker *oauthbroker.Broker
 	refreshFunc := func(ctx context.Context, provider string, cur *vault.TokenData) (*vault.TokenData, error) {
 		if provider == "jira" {
-			return refreshJiraToken(ctx, cfg, cur)
+			return refreshJiraToken(ctx, cfg, broker, cur)
 		}
 		return nil, fmt.Errorf("provider %s does not support token refresh", provider)
 	}
@@ -68,13 +69,12 @@ func main() {
 	tokenVault := vault.NewTokenVault("", st, kms, cfg.KMSKeyName, refreshFunc)
 	toolRegistry := providers.NewRegistry(cfg, nil, nil)
 	authServer := auth.NewOAuthServer(cfg, st, nil)
-	broker := oauthbroker.NewBroker(cfg, st, tokenVault, authServer.SessionManager(), nil)
+	broker = oauthbroker.NewBroker(cfg, st, tokenVault, authServer.SessionManager(), nil)
 	mcpServer := mcp.NewServer(cfg, toolRegistry, tokenVault, st)
 
 	mux := http.NewServeMux()
 
 	// Health check endpoints: /health and /healthz
-	// Note: Cloud Run GFE reserves /healthz internally, so /health is mandatory for external probes!
 	healthHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -136,15 +136,24 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func refreshJiraToken(ctx context.Context, cfg *config.Config, cur *vault.TokenData) (*vault.TokenData, error) {
+func refreshJiraToken(ctx context.Context, cfg *config.Config, broker *oauthbroker.Broker, cur *vault.TokenData) (*vault.TokenData, error) {
 	if cur.RefreshToken == "" {
 		return nil, errors.New("no refresh token available for Jira")
 	}
 
+	clientID := cfg.JiraOAuthClientID
+	clientSecret := cfg.JiraOAuthClientSecret
+	if broker != nil {
+		if id, sec, _ := broker.ResolveOAuthCredentials(ctx, "jira"); id != "" && sec != "" {
+			clientID = id
+			clientSecret = sec
+		}
+	}
+
 	payload := map[string]string{
 		"grant_type":    "refresh_token",
-		"client_id":     cfg.JiraOAuthClientID,
-		"client_secret": cfg.JiraOAuthClientSecret,
+		"client_id":     clientID,
+		"client_secret": clientSecret,
 		"refresh_token": cur.RefreshToken,
 	}
 	bodyBytes, err := json.Marshal(payload)
@@ -181,13 +190,14 @@ func refreshJiraToken(ctx context.Context, cfg *config.Config, cur *vault.TokenD
 	}
 
 	return &vault.TokenData{
-		AccessToken:  res.AccessToken,
-		RefreshToken: res.RefreshToken,
-		ExpiresAt:    time.Now().Add(time.Duration(res.ExpiresIn) * time.Second),
-		Scope:        cur.Scope,
-		CloudID:      cur.CloudID,
-		SiteURL:      cur.SiteURL,
-		AccountLabel: cur.AccountLabel,
-		UpdatedAt:    time.Now(),
+		AccessToken:   res.AccessToken,
+		RefreshToken:  res.RefreshToken,
+		ConnectorType: "oauth2",
+		ExpiresAt:     time.Now().Add(time.Duration(res.ExpiresIn) * time.Second),
+		Scope:         cur.Scope,
+		CloudID:       cur.CloudID,
+		SiteURL:       cur.SiteURL,
+		AccountLabel:  cur.AccountLabel,
+		UpdatedAt:     time.Now(),
 	}, nil
 }
