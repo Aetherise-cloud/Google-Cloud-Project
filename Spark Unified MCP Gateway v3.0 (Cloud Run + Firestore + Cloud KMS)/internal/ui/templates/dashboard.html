@@ -69,14 +69,27 @@
                 {{if eq .ID "gflow"}}
                   <span class="badge badge-adc">ACTIVE (BUILT-IN + ADC)</span>
                   <span class="badge badge-custom">IMAGE &amp; VIDEO AI (11 TOOLS)</span>
+                {{else if eq .ID "notion"}}
+                  {{if .Connected}}
+                    <span class="badge badge-adc">ACTIVE (SECRET MANAGER)</span>
+                    <span class="badge badge-custom">NOTION API v1 (7 TOOLS)</span>
+                  {{else}}
+                    <span class="badge badge-disconnected">Not Connected</span>
+                  {{end}}
                 {{else if .KeylessADC}}
                   <span class="badge badge-adc">Active (Keyless ADC)</span>
                   <span class="badge badge-readonly">Read-Only</span>
                 {{else}}
                   {{if .Connected}}
                     <span class="badge badge-connected">Connected</span>
+                    {{if not .NeedsConfig}}
+                    <span class="badge badge-adc">OAuth App Ready (Secret Manager)</span>
+                    {{end}}
                   {{else}}
                     <span class="badge badge-disconnected">Not Connected</span>
+                    {{if not .NeedsConfig}}
+                    <span class="badge badge-adc">OAuth App Ready (Secret Manager)</span>
+                    {{end}}
                     {{if .NeedsConfig}}
                     <span class="badge badge-warning">Needs OAuth Setup (SETUP REQUIRED)</span>
                     {{end}}
@@ -103,6 +116,12 @@
                 <span class="meta-val">Models: Nano Banana 2.1 (nano2), Nano Pro, Imagen 4, Veo Fast / Quality (t2v, i2v, r2v), 2K/4K &amp; 1080p Upscale</span>
               </div>
               {{end}}
+              {{if eq .ID "notion"}}
+              <div class="connector-meta-row">
+                <span class="meta-label">Capabilities:</span>
+                <span class="meta-val">Tools (7 Read/Write): Search Pages &amp; Databases, Read Page Properties, Read Block Content, Query Databases, Inspect Schemas, Create Pages, Append Blocks</span>
+              </div>
+              {{end}}
               {{if .AccountLabel}}
               <div class="connector-meta-row">
                 <span class="meta-label">Account:</span>
@@ -123,7 +142,7 @@
               {{end}}
               <div class="connector-meta-row">
                 <span class="meta-label">Type:</span>
-                <span class="meta-val">{{if .KeylessADC}}Keyless Google ADC{{else if .IsCustom}}{{if eq .ConnectorType "rest_api"}}Custom REST API{{else}}Custom Remote MCP{{end}}{{else}}OAuth 2.0 Integration{{end}}</span>
+                <span class="meta-val">{{if eq .ID "notion"}}Managed Secret Manager Integration (NOTION_API_TOKEN){{else if .KeylessADC}}Keyless Google ADC{{else if .IsCustom}}{{if eq .ConnectorType "rest_api"}}Custom REST API{{else}}Custom Remote MCP{{end}}{{else}}OAuth 2.0 Integration{{end}}</span>
               </div>
               {{if .SiteName}}
               <div class="connector-meta-row">
@@ -159,7 +178,14 @@
           </div>
 
           <div class="connector-actions">
-            {{if eq .ID "gflow"}}
+            {{if eq .ID "notion"}}
+              <div class="text-muted" style="font-size: 0.82rem; font-style: italic; margin-bottom: 8px;">
+                Pre-configured via GCP Secret Manager (spark-notion-api-token). Ready for Gemini Spark &amp; MCP clients with zero manual setup.
+              </div>
+              <div class="btn-row">
+                <button type="button" class="btn btn-sm btn-outline" onclick="openTutorial('notion')">Setup Guide</button>
+              </div>
+            {{else if eq .ID "gflow"}}
               <div class="text-muted" style="font-size: 0.82rem; font-style: italic; margin-bottom: 8px;">
                 Built-in Google Flow generation engine with ADC authentication. No manual credentials required.
               </div>
@@ -198,6 +224,14 @@
                   <option value="full_access" {{if eq .ScopeMode "full_access"}}selected{{end}}>Full Access (Read + Write)</option>
                 </select>
               </div>
+
+              {{if not .Connected}}
+                {{if not .NeedsConfig}}
+                <div class="text-muted" style="font-size: 0.82rem; font-style: italic; margin-bottom: 8px;">
+                  OAuth Client ID &amp; Secret pre-configured in GCP Secret Manager &mdash; click Connect for 1-click sign-in.
+                </div>
+                {{end}}
+              {{end}}
 
               <div class="btn-row">
                 {{if .NeedsConfig}}
@@ -305,12 +339,14 @@
             </div>
           </div>
           <!-- 4. Notion -->
-          <div class="catalog-card" data-category="prod" data-name="notion" onclick="selectConnectorTemplate('notion')">
+          <div class="catalog-card" data-category="prod mcp" data-name="notion" onclick="openTutorial('notion')">
             <div class="catalog-icon">NT</div>
             <div class="catalog-info">
-              <div class="catalog-name">Notion <span class="badge badge-adc">REST / MCP</span></div>
-              <div class="catalog-desc">Workspaces, databases, and pages via Notion API + Integration Secret.</div>
-              <div class="catalog-action">Select &amp; View Tutorial &rarr;</div>
+              <div class="catalog-name">Notion (Notion MCP) <span class="badge badge-adc">Secret Manager</span></div>
+              <div class="catalog-desc">Workspaces, databases, and pages &mdash; 7 Read/Write tools via Secret Manager (spark-notion-api-token).</div>
+              <div class="catalog-action" style="display: flex; gap: 6px; flex-wrap: wrap;">
+                <button type="button" class="btn btn-sm btn-outline" onclick="event.stopPropagation(); openTutorial('notion'); closeModal('catalog-modal');">Setup Guide &rarr;</button>
+              </div>
             </div>
           </div>
           <!-- 5. Slack -->
@@ -318,7 +354,7 @@
             <div class="catalog-icon">SL</div>
             <div class="catalog-info">
               <div class="catalog-name">Slack <span class="badge badge-adc">REST / MCP</span></div>
-              <div class="catalog-desc">Workspace channels, member search, and thread message posting via Slack Bot Token.</div>
+              <div class="catalog-desc">Workspace channels, message search, and posting via Slack Bot Token.</div>
               <div class="catalog-action">Select &amp; View Tutorial &rarr;</div>
             </div>
           </div>
@@ -354,7 +390,7 @@
             <div class="catalog-icon">MCP</div>
             <div class="catalog-info">
               <div class="catalog-name">Custom Remote MCP Server <span class="badge badge-custom">Custom</span></div>
-              <div class="catalog-desc">Streamable HTTP JSON-RPC /mcp upstream microservice + optional Bearer Token.</div>
+              <div class="catalog-desc">Streamable HTTP JSON-RPC /mcp upstream endpoint + optional Bearer Token.</div>
               <div class="catalog-action">Select &amp; View Tutorial &rarr;</div>
             </div>
           </div>
@@ -363,7 +399,7 @@
             <div class="catalog-icon">API</div>
             <div class="catalog-info">
               <div class="catalog-name">Custom REST API Connector <span class="badge badge-custom">Custom</span></div>
-              <div class="catalog-desc">Any enterprise HTTPS REST API microservice + custom Authorization Header.</div>
+              <div class="catalog-desc">Any enterprise HTTPS REST API endpoint + custom Authorization Header.</div>
               <div class="catalog-action">Select &amp; View Tutorial &rarr;</div>
             </div>
           </div>
@@ -867,7 +903,7 @@
         var name = cards[i].getAttribute('data-name') || '';
         var text = cards[i].innerText.toLowerCase();
         if (!q || name.indexOf(q) !== -1 || text.indexOf(q) !== -1) {
-          cards[j].style.display = 'flex';
+          cards[i].style.display = 'flex';
         } else {
           cards[i].style.display = 'none';
         }
@@ -968,6 +1004,24 @@
     };
 
     var TUTORIAL_GUIDES = {
+      notion: {
+        title: 'Notion Built-In MCP Setup Guide',
+        badge: 'Secret Manager (7 Tools)',
+        steps: [
+          {
+            title: 'Pre-configured GCP Secret Manager Token',
+            text: 'Notion MCP is pre-configured via GCP Secret Manager (spark-notion-api-token). It authenticates automatically with Notion API v1 without manual credential entry.'
+          },
+          {
+            title: '7 Full-Featured Read/Write Tools',
+            text: 'Exposes 7 Notion workspace tools: notion_search, notion_get_page, notion_get_block_children, notion_query_database, notion_get_database, notion_create_page, and notion_append_block_children.'
+          },
+          {
+            title: 'Zero Manual Setup for MCP Clients',
+            text: 'Ready for Gemini Spark & MCP clients with zero manual setup. Workspace access and page permissions can be managed directly in Notion integration settings.'
+          }
+        ]
+      },
       gcp: {
         title: 'Google Cloud Platform (GCP Read-Only MCP) Setup Guide',
         badge: 'Keyless ADC (9 Read-Only Tools)',
@@ -1158,6 +1212,29 @@
       }
     }
 
+    function extractApiError(data, fallback) {
+      if (!data) return fallback;
+      if (typeof data.error_description === 'string' && data.error_description.trim() !== '') {
+        return data.error_description;
+      }
+      if (typeof data.error === 'string' && data.error.trim() !== '') {
+        return data.error;
+      }
+      if (data.error && typeof data.error === 'object') {
+        if (data.error.data && typeof data.error.data.error_description === 'string' && data.error.data.error_description.trim() !== '') {
+          return data.error.data.error_description;
+        }
+        if (typeof data.error.message === 'string' && data.error.message.trim() !== '') {
+          return data.error.message;
+        }
+        try { return JSON.stringify(data.error); } catch (e) {}
+      }
+      if (typeof data.message === 'string' && data.message.trim() !== '') {
+        return data.message;
+      }
+      return fallback;
+    }
+
     function showSetupAlert(msg, isError) {
       var box = document.getElementById('setup-alert');
       var text = document.getElementById('setup-alert-text');
@@ -1184,9 +1261,13 @@
         })
       })
       .then(function(res) {
-        return res.json().then(function(data) {
-          if (!res.ok) throw new Error(data.error_description || data.error || 'Failed to save GitHub PAT');
-          return data;
+        return res.text().then(function(text) {
+          var data = null;
+          try { data = text ? JSON.parse(text) : {}; } catch (e) {}
+          if (!res.ok) {
+            throw new Error(extractApiError(data, (text && text.trim()) || ('HTTP ' + res.status + ': Failed to save GitHub PAT')));
+          }
+          return data || {};
         });
       })
       .then(function() {
@@ -1196,6 +1277,9 @@
         showSetupAlert(err.message, true);
       });
     }
+
+    var submitPatConnect = submitGitHubPAT;
+    window.submitPatConnect = submitGitHubPAT;
 
     function saveOAuthConfigOnly(app) {
       var clientId = (app === 'github' ? document.getElementById('gh-client-id') : document.getElementById('jira-client-id')).value.trim();
@@ -1219,9 +1303,13 @@
         })
       })
       .then(function(res) {
-        return res.json().then(function(data) {
-          if (!res.ok) throw new Error(data.error_description || data.error || 'Failed to save OAuth configuration');
-          return data;
+        return res.text().then(function(text) {
+          var data = null;
+          try { data = text ? JSON.parse(text) : {}; } catch (e) {}
+          if (!res.ok) {
+            throw new Error(extractApiError(data, (text && text.trim()) || ('HTTP ' + res.status + ': Failed to save OAuth configuration')));
+          }
+          return data || {};
         });
       })
       .then(function() {
@@ -1250,9 +1338,13 @@
         })
       })
       .then(function(res) {
-        return res.json().then(function(data) {
-          if (!res.ok) throw new Error(data.error_description || data.error || 'Failed to save OAuth configuration');
-          return data;
+        return res.text().then(function(text) {
+          var data = null;
+          try { data = text ? JSON.parse(text) : {}; } catch (e) {}
+          if (!res.ok) {
+            throw new Error(extractApiError(data, (text && text.trim()) || ('HTTP ' + res.status + ': Failed to save OAuth configuration')));
+          }
+          return data || {};
         });
       })
       .then(function() {
@@ -1294,9 +1386,13 @@
         })
       })
       .then(function(res) {
-        return res.json().then(function(data) {
-          if (!res.ok) throw new Error(data.error_description || data.error || 'Failed to save custom connector');
-          return data;
+        return res.text().then(function(text) {
+          var data = null;
+          try { data = text ? JSON.parse(text) : {}; } catch (e) {}
+          if (!res.ok) {
+            throw new Error(extractApiError(data, (text && text.trim()) || ('HTTP ' + res.status + ': Failed to save custom connector')));
+          }
+          return data || {};
         });
       })
       .then(function() {
@@ -1321,9 +1417,13 @@
         })
       })
       .then(function(res) {
-        return res.json().then(function(data) {
-          if (!res.ok) throw new Error(data.error || 'Failed to generate static client');
-          return data;
+        return res.text().then(function(text) {
+          var data = null;
+          try { data = text ? JSON.parse(text) : {}; } catch (e) {}
+          if (!res.ok) {
+            throw new Error(extractApiError(data, (text && text.trim()) || ('HTTP ' + res.status + ': Failed to generate static client')));
+          }
+          return data || {};
         });
       })
       .then(function(data) {
@@ -1381,9 +1481,13 @@
         credentials: 'same-origin'
       })
       .then(function(res) {
-        return res.json().then(function(data) {
-          if (!res.ok) throw new Error(data.error_description || data.error || 'Failed to fetch workspaces');
-          return data;
+        return res.text().then(function(text) {
+          var data = null;
+          try { data = text ? JSON.parse(text) : {}; } catch (e) {}
+          if (!res.ok) {
+            throw new Error(extractApiError(data, (text && text.trim()) || ('HTTP ' + res.status + ': Failed to fetch workspaces')));
+          }
+          return data || {};
         });
       })
       .then(function(data) {
@@ -1460,7 +1564,6 @@
           rLbl.className = 'checkbox-item';
           var rCb = document.createElement('input');
           rCb.type = 'checkbox';
-          rCb.value = rName;
           rCb.name = 'ws_allowed_read_repos';
           if (allowedReadRepos.indexOf(rName) !== -1) rCb.checked = true;
           var rSp = document.createElement('span');
@@ -1478,7 +1581,6 @@
           wrLbl.className = 'checkbox-item';
           var wrCb = document.createElement('input');
           wrCb.type = 'checkbox';
-          wrCb.value = wrName;
           wrCb.name = 'ws_allowed_write_repos';
           if (allowedWriteRepos.indexOf(wrName) !== -1) wrCb.checked = true;
           var wrSp = document.createElement('span');
@@ -1598,9 +1700,13 @@
         body: JSON.stringify(payload)
       })
       .then(function(res) {
-        return res.json().then(function(data) {
-          if (!res.ok) throw new Error(data.error_description || data.error || 'Failed to save workspace scopes');
-          return data;
+        return res.text().then(function(text) {
+          var data = null;
+          try { data = text ? JSON.parse(text) : {}; } catch (e) {}
+          if (!res.ok) {
+            throw new Error(extractApiError(data, (text && text.trim()) || ('HTTP ' + res.status + ': Failed to save workspace scopes')));
+          }
+          return data || {};
         });
       })
       .then(function() {
@@ -1617,6 +1723,11 @@
         if (btn) btn.disabled = false;
       });
     }
+
+    var openWorkspacePicker = openWorkspaceModal;
+    var saveWorkspaceSelection = saveWorkspaceScopes;
+    window.openWorkspacePicker = openWorkspaceModal;
+    window.saveWorkspaceSelection = saveWorkspaceScopes;
 
     window.addEventListener('message', function(event) {
       if (event.origin !== window.location.origin) return;
