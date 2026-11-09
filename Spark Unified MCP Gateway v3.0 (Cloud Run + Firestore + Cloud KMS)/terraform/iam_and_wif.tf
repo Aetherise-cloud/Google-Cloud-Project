@@ -76,7 +76,7 @@ resource "google_iam_workload_identity_pool_provider" "spark_mcp_oidc" {
     "attribute.event_name"    = "assertion.event_name"
   }
 
-  attribute_condition = "assertion.repository_id=='${var.github_repository_id}'&&(assertion.ref=='refs/heads/main'||assertion.ref=='refs/heads/staging'||assertion.event_name=='pull_request')"
+  attribute_condition = "assertion.repository_id=='${var.github_repository_id}'&&(assertion.ref=='refs/heads/main'||assertion.ref=='refs/heads/staging')"
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
@@ -97,7 +97,16 @@ resource "google_service_account_iam_member" "gh_deployer_workload_identity_user
   count              = var.create_wif_pool ? 1 : 0
   service_account_id = google_service_account.gh_deployer[0].name
   role               = "roles/iam.workloadIdentityUser"
-  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github[0].name}/attribute.repository_id/${var.github_repository_id}"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github[0].name}/attribute.ref/refs/heads/main"
+}
+
+# Optional explicit refs/heads/main binding for pre-bootstrapped deployer service account
+# Activated when create_wif_pool is false and enforce_deployer_main_ref_binding is true.
+resource "google_service_account_iam_member" "existing_gh_deployer_main_only" {
+  count              = !var.create_wif_pool && var.enforce_deployer_main_ref_binding ? 1 : 0
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${var.existing_gh_deployer_sa_email}"
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/projects/${var.project_number}/locations/global/workloadIdentityPools/github/attribute.ref/refs/heads/main"
 }
 
 # 2. Resource-Scoped & Admin Deployer Permissions (Granted to existing or created deployer SA)
