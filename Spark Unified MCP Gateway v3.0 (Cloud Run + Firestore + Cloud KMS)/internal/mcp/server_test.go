@@ -545,4 +545,30 @@ func TestFlow3Anti503AndToolErrorAndAutoRefresh(t *testing.T) {
 	if strings.HasPrefix(strings.TrimSpace(rec503.Body.String()), "Service") {
 		t.Error("expected text/plain body to be rewritten into JSON-RPC envelope")
 	}
+	var res503 map[string]interface{}
+	_ = json.Unmarshal(rec503.Body.Bytes(), &res503)
+	if res503["error_description"] != "Upstream service temporarily unavailable or cold-starting" {
+		t.Errorf("expected top-level error_description in 503 response, got: %v", res503["error_description"])
+	}
+
+	// 6. Test JSONErrorMiddleware: explicit REST API JSON error is NOT clobbered
+	restErrorHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"server_error","error_description":"custom vault error"}`))
+	})
+	protectedREST := JSONErrorMiddleware(restErrorHandler)
+	reqREST := httptest.NewRequest("POST", "/api/connectors/jira/oauth-config", strings.NewReader(`{}`))
+	reqREST.Header.Set("Accept", "application/json")
+	recREST := httptest.NewRecorder()
+	protectedREST.ServeHTTP(recREST, reqREST)
+
+	if recREST.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 preserved for REST API, got %d", recREST.Code)
+	}
+	var restRes map[string]string
+	_ = json.Unmarshal(recREST.Body.Bytes(), &restRes)
+	if restRes["error_description"] != "custom vault error" {
+		t.Errorf("expected preserved error_description, got: %v", restRes["error_description"])
+	}
 }
