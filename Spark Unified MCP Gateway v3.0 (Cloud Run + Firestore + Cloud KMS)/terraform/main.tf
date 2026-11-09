@@ -18,6 +18,8 @@ locals {
     "serviceusage.googleapis.com",
     "developerknowledge.googleapis.com",
     "billingbudgets.googleapis.com",
+    "monitoring.googleapis.com",
+    "logging.googleapis.com",
   ]
 }
 
@@ -396,7 +398,7 @@ resource "google_cloud_run_v2_service" "spark_mcp_gateway" {
       }
       env {
         name  = "ALLOW_LOCAL_CLIENTS"
-        value = "false"
+        value = "true"
       }
       env {
         name  = "DEV_MODE"

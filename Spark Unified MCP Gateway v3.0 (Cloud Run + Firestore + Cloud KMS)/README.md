@@ -14,12 +14,13 @@
 2. [Dual-Plane Architecture](#-dual-plane-architecture)
 3. [TokenVault & Cloud KMS Envelope Encryption](#-tokenvault--cloud-kms-envelope-encryption)
 4. [Unified Tool Matrix (10 Tools)](#-unified-tool-matrix-10-tools)
-5. [Local Development Quickstart](#-local-development-quickstart)
-6. [Declarative Terraform Infrastructure](#-declarative-terraform-infrastructure)
-7. [External OAuth Application Setup](#-external-oauth-application-setup)
-8. [Connecting AI Clients (Gemini Spark & Cursor)](#-connecting-ai-clients-gemini-spark--cursor)
-9. [FinOps 3-Tier Monthly Cost Breakdown](#-finops-3-tier-monthly-cost-breakdown)
-10. [Observability, Redaction & Troubleshooting](#-observability-redaction--troubleshooting)
+5. [Core Gateway Protocol Flows (Flows 1, 2, 3)](#-core-gateway-protocol-flows)
+6. [Local Development Quickstart](#-local-development-quickstart)
+7. [Declarative Terraform Infrastructure](#-declarative-terraform-infrastructure)
+8. [External OAuth Application Setup](#-external-oauth-application-setup)
+9. [Connecting AI Clients (Gemini Spark & Cursor)](#-connecting-ai-clients-gemini-spark--cursor)
+10. [FinOps 3-Tier Monthly Cost Breakdown](#-finops-3-tier-monthly-cost-breakdown)
+11. [Section E: Hardened CI/CD, Observability & Redaction](#-section-e-hardened-cicd-observability--redaction)
 
 ---
 
@@ -96,6 +97,83 @@ flowchart TD
 
 ---
 
+## 🔒 TokenVault & Cloud KMS Envelope Encryption
+
+Upstream access tokens and refresh tokens are protected at rest using regional Cloud KMS envelope encryption:
+1. When storing credentials in Firestore (`spark-mcp-db`), a cryptographic 32-byte Data Encryption Key (DEK) is randomly generated via `crypto/rand`.
+2. The payload is encrypted with AES-256-GCM using authenticated additional data (AAD) bound to the owner's Google identity (`userID:provider`).
+3. The DEK is wrapped by the regional Cloud KMS Key Encryption Key (`projects/spark-mcp-gateway-v3/locations/asia-southeast1/keyRings/spark-mcp-ring/cryptoKeys/mcp-token-kek`).
+4. Only the wrapped DEK and encrypted ciphertext are stored in Firestore; raw plaintext keys are never persisted to disk.
+
+---
+
+## 🛠️ Unified Tool Matrix (10 Tools)
+
+| Tool Name | Provider | Scope Requirement | Minimal Preset | Description |
+|---|---|---|---|---|
+| `gdk_search_docs` | Google | `read_only` | ✅ Yes | Official Google Developer Knowledge search across Google Cloud documentation |
+| `gdk_get_doc` | Google | `read_only` | ✅ Yes | Fetch verbatim markdown documentation by document URI |
+| `gcp_list_cloudrun_services` | Google Cloud | `read_only` | ✅ Yes | Enumerate Cloud Run v2 services across project & region via keyless ADC |
+| `gcp_get_cloudrun_service` | Google Cloud | `read_only` | ❌ No | Inspect Cloud Run service configuration (with secrets strictly redacted) |
+| `github_list_prs` | GitHub | `read_only` | ❌ No | List pull requests for a given repository with state filtering |
+| `github_read_file` | GitHub | `read_only` | ❌ No | Fetch raw file contents from a repository branch or commit |
+| `github_create_issue` | GitHub | `full_access` | ❌ No | Create a new issue (guarded by `allowed_write_repos`) |
+| `jira_get_issue` | Atlassian | `read_only` | ❌ No | Retrieve Jira issue details with flattened plaintext ADF descriptions |
+| `jira_search_issues` | Atlassian | `read_only` | ❌ No | Query Jira Cloud issues using JQL syntax (scoped to `allowed_space_keys`) |
+| `jira_create_issue` | Atlassian | `full_access` | ❌ No | Create a Jira issue in authorized project spaces |
+| `jira_update_issue_status` | Atlassian | `full_access` | ❌ No | Perform workflow status transitions on Jira issues |
+
+---
+
+## ⚡ Core Gateway Protocol Flows
+
+### Flow 1: Direct-Link Onboarding, OAuth 2.1 DCR & Interactive Workspace Picker
+- **OAuth 2.1 RFC 8414 & RFC 7591 Dynamic Client Registration (DCR)**:
+  - Endpoints: `POST /api/oauth/register` (`/register`), `GET /authorize`, `POST /api/oauth/token` (`/token`), and `GET /.well-known/oauth-protected-resource`.
+  - Direct-link onboarding allows AI clients (Gemini Spark, Cursor IDE, Claude Code) to dynamically register without hardcoded pre-shared client credentials.
+  - Configured with `ALLOW_LOCAL_CLIENTS="true"` in Cloud Run: permits loopback redirect URIs (`http://127.0.0.1:*`, `http://localhost:*`) and dynamic AI client callback handlers.
+- **Interactive Workspace & Scope Picker**:
+  - The admin dashboard (`/dashboard`) hosts an interactive wizard for managing connector authorizations.
+  - Operators select target GitHub Organizations (`selected_orgs`), specific read repositories (`allowed_read_repos`), write repositories (`allowed_write_repos`), and Atlassian Jira site spaces (`allowed_space_keys`) before generating cryptographic scoped JWTs.
+
+### Flow 2: Hot-Path Scope & Write Guardrails
+- **Granular Token Scope Boundaries**:
+  - Each issued ES256 Bearer JWT encapsulates provider permissions (`read_only`, `full_access`, or `none`).
+  - Hot-path checks evaluate permissions before any tool invocation reaches upstream APIs.
+- **Guardrail Parameter Enforcement**:
+  - `selected_orgs`: Restricts GitHub tool calls strictly to approved organization boundaries.
+  - `allowed_read_repos`: Allowlist for repository reads (`github_list_prs`, `github_read_file`).
+  - `allowed_write_repos`: Strictly constrains mutating actions (`github_create_issue`). Unlisted repositories are blocked immediately with `Access denied`.
+  - `allowed_space_keys`: Restricts Jira tools (`jira_get_issue`, `jira_search_issues`, `jira_create_issue`, and `jira_update_issue_status`) to authorized Jira project keys.
+
+### Flow 3: Anti-503 Standardized JSON-RPC 2.0 Error Envelope & Token Auto-Refresh
+- **Standardized JSON-RPC 2.0 Error Envelopes (Zero 503 HTTP Drops)**:
+  - Standard HTTP reverse proxies return HTTP 502/503 on upstream failures, which causes AI IDEs to drop the MCP connection and fail the user's prompt.
+  - Spark MCP Gateway intercepts all upstream network errors, expired credentials, and permission denials, returning an HTTP 200 OK with a standardized JSON-RPC 2.0 response:
+    ```json
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Provider github is not connected or credentials expired. Re-authenticate at: https://spark-mcp-gateway-515472562394.asia-southeast1.run.app/dashboard"
+          }
+        ],
+        "isError": true
+      }
+    }
+    ```
+- **Distributed CAS Refresh Lease**:
+  - Atlassian 3LO OAuth uses rotating refresh tokens where exchanging a token immediately revokes the old one. Under multi-instance Cloud Run concurrency, simultaneous requests would cause split-brain invalidation.
+  - Firestore ACID transaction locks lease token renewal for 15 seconds (`lease_expires_at = now + 15s`). Concurrent workers wait on a singleflight channel, eliminating race conditions.
+- **Upstream 401 Auto-Refresh**:
+  - When an upstream API responds with HTTP 401, TokenVault attempts an automatic background refresh using the valid refresh token before reporting failure.
+  - If unrecoverable, clear markdown re-authorization links are delivered directly in the tool response.
+
+---
+
 ## 💻 Local Development Quickstart
 
 Run the gateway locally using in-memory mock stores and loopback OAuth bypass:
@@ -115,12 +193,11 @@ go run ./cmd/gateway
 
 ## 🏗️ Declarative Terraform Infrastructure
 
-Infrastructure is fully automated with Terraform in `terraform/` against `gs://spark-mcp-gateway-v3-tfstate`:
+Infrastructure is fully automated with Terraform in `terraform/` against remote state `gs://spark-mcp-gateway-v3-tfstate`:
 
 ```bash
 cd "Spark Unified MCP Gateway v3.0 (Cloud Run + Firestore + Cloud KMS)/terraform"
 terraform init
-terraform validate
 terraform plan
 terraform apply
 ```
@@ -187,7 +264,43 @@ terraform apply
 
 ---
 
-## 🔍 Observability, Redaction & Troubleshooting
+## 🛡️ Section E: Hardened CI/CD, Observability & Redaction
+
+### E.1 Workload Identity Federation (WIF) Security & PR Separation
+- **Protected Branch Scoping**:
+  The GitHub Actions Workload Identity Pool Provider (`spark-mcp-oidc`) attribute condition enforces:
+  ```hcl
+  attribute_condition = "assertion.repository_id=='${var.github_repository_id}'&&(assertion.ref=='refs/heads/main'||assertion.ref=='refs/heads/staging')"
+  ```
+- **Privileged SA Impersonation Restriction**:
+  Untrusted `pull_request` events cannot impersonate `gh-deployer`. Deployer impersonation (`roles/iam.workloadIdentityUser`) is strictly bound to `refs/heads/main`, ensuring that untrusted code in fork PRs cannot perform privileged operations (`roles/iam.roleAdmin`, `roles/cloudkms.admin`).
+
+### E.2 Cloud Run Image Drift Lifecycle Protection & Secret Redaction
+- **Terraform Lifecycle Protection**:
+  To prevent Terraform from overwriting revision images deployed by CI/CD, the Cloud Run resource defines:
+  ```hcl
+  lifecycle {
+    ignore_changes = [
+      template[0].containers[0].image,
+      client,
+      client_version,
+      traffic,
+    ]
+  }
+  ```
+- **Secret & Environment Redaction (`gcp_get_cloudrun_service`)**:
+  When AI clients inspect Cloud Run services, the gateway strips sensitive configuration:
+  - Sanitizes container environment variables (`env`) and Secret Manager volume mounts (`volumeMounts`).
+  - Returns only safe operational metrics (URI, scaling min/max, service account email, image digest).
+
+### E.3 Observability & Key Alerting SLIs
+Cloud Monitoring alert policies defined in `terraform/monitoring.tf` provide proactive incident detection:
+1. **Cloud Run 5xx Response Rate Alert (`google_monitoring_alert_policy.cloudrun_5xx_rate`)**:
+   - Triggers when 5xx errors exceed **1%** over a 5-minute alignment window (`run.googleapis.com/request_count`).
+   - Identifies cold-start latency timeouts, container crashes, or upstream database permission regressions.
+2. **Cloud KMS Decrypt Error Spike Alert (`google_monitoring_alert_policy.kms_decrypt_error_spike`)**:
+   - Monitors Cloud Audit Logs via log metric `spark_mcp_kms_decrypt_errors` (`protoPayload.serviceName="cloudkms.googleapis.com" AND protoPayload.methodName="Decrypt" AND severity>=ERROR`).
+   - Triggers immediately if any Decrypt error occurs on `mcp-token-kek`, catching ciphertext corruption or IAM permission loss.
 
 ### Inspecting Production Logs
 ```bash
