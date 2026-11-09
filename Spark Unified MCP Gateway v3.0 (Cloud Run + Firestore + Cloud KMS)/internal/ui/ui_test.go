@@ -1258,3 +1258,323 @@ func TestRenderDashboard_GCPAndGFlowMCP(t *testing.T) {
 		t.Errorf("TUTORIAL_GUIDES missing https://flow.google.com/mcp for remote GFlow")
 	}
 }
+
+func TestRenderDashboard_ExtractApiErrorHelper(t *testing.T) {
+	rec := httptest.NewRecorder()
+	data := ui.DashboardPageData{
+		AdminEmail:  "admin@example.com",
+		ServiceURL:  "https://gateway.example.com",
+		MCPEndpoint: "https://gateway.example.com/mcp",
+		CSRFToken:   "csrf-err-test",
+		Connectors: []ui.ConnectorView{
+			{
+				ID:          "jira",
+				Name:        "Atlassian Jira",
+				Description: "Jira integration",
+				Connected:   false,
+			},
+			{
+				ID:          "github",
+				Name:        "GitHub",
+				Description: "GitHub integration",
+				Connected:   false,
+			},
+		},
+	}
+
+	err := ui.RenderDashboard(rec, http.StatusOK, data)
+	if err != nil {
+		t.Fatalf("RenderDashboard failed: %v", err)
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	assertSecurityHeaders(t, rec)
+	body := rec.Body.String()
+
+	// 1. Verify extractApiError definition and inspection logic
+	requiredPatterns := []string{
+		"function extractApiError(data, fallback)",
+		"typeof data.error_description === 'string'",
+		"typeof data.error === 'string'",
+		"typeof data.error === 'object'",
+		"data.error.data && typeof data.error.data.error_description === 'string'",
+		"typeof data.error.message === 'string'",
+		"JSON.stringify(data.error)",
+		"typeof data.message === 'string'",
+	}
+	for _, pat := range requiredPatterns {
+		if !strings.Contains(body, pat) {
+			t.Errorf("extractApiError missing pattern in dashboard.html: %q", pat)
+		}
+	}
+
+	// 2. Verify backward-compatible function aliases
+	aliases := []string{
+		"window.submitPatConnect = submitGitHubPAT;",
+		"window.openWorkspacePicker = openWorkspaceModal;",
+		"window.saveWorkspaceSelection = saveWorkspaceScopes;",
+	}
+	for _, alias := range aliases {
+		if !strings.Contains(body, alias) {
+			t.Errorf("missing function alias in dashboard.html: %q", alias)
+		}
+	}
+
+	// 3. Verify robust res.text() and extractApiError handling across key modal actions
+	handlers := []string{
+		"saveOAuthConfigOnly",
+		"submitOAuthConfig",
+		"submitGitHubPAT",
+		"submitCustomConnector",
+		"generateStaticOAuthClient",
+		"openWorkspaceModal",
+		"saveWorkspaceScopes",
+	}
+	for _, handler := range handlers {
+		if !strings.Contains(body, handler) {
+			t.Errorf("missing handler %q in dashboard.html", handler)
+		}
+	}
+
+	// Ensure extractApiError is invoked in error handling
+	if strings.Count(body, "extractApiError(") < 7 {
+		t.Errorf("expected extractApiError to be called across all modal error handlers, got count %d", strings.Count(body, "extractApiError("))
+	}
+}
+
+func TestRenderAuthorize_ExtractApiErrorHelper(t *testing.T) {
+	rec := httptest.NewRecorder()
+	data := ui.AuthorizePageData{
+		ClientID:      "client-123",
+		ClientName:    "Cursor Client",
+		RedirectURI:   "https://oauth.pstmn.io/v1/callback",
+		State:         "state-abc",
+		DefaultPreset: "read_only",
+		CSRFToken:     "csrf-auth-err",
+		ServiceURL:    "https://gateway.example.com",
+		Resource:      "https://gateway.example.com/mcp",
+		Connectors: []ui.ConnectorView{
+			{
+				ID:        "github",
+				Name:      "GitHub",
+				Connected: true,
+			},
+			{
+				ID:        "jira",
+				Name:      "Atlassian Jira",
+				Connected: true,
+			},
+		},
+	}
+
+	err := ui.RenderAuthorize(rec, http.StatusOK, data)
+	if err != nil {
+		t.Fatalf("RenderAuthorize failed: %v", err)
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	assertSecurityHeaders(t, rec)
+	body := rec.Body.String()
+
+	// Verify extractApiError definition in authorize.html
+	if !strings.Contains(body, "function extractApiError(data, fallback)") {
+		t.Errorf("expected extractApiError definition in authorize.html")
+	}
+	if !strings.Contains(body, "data.error.message") {
+		t.Errorf("expected data.error.message inspection in authorize.html")
+	}
+	if !strings.Contains(body, "extractApiError(data,") {
+		t.Errorf("expected extractApiError usage in authorize.html")
+	}
+	if !strings.Contains(body, "Failed to discover GitHub workspaces") {
+		t.Errorf("expected fallback for GitHub workspace discovery")
+	}
+	if !strings.Contains(body, "Failed to discover Jira spaces") {
+		t.Errorf("expected fallback for Jira space discovery")
+	}
+}
+
+func TestRenderDashboard_NotionMCPAndSecretManagerOAuth(t *testing.T) {
+	connectors := []ui.ConnectorView{
+		{
+			ID:            "github",
+			Name:          "GitHub",
+			Description:   "Pull requests, code browsing, and issue creation",
+			Connected:     false,
+			OAuthConfigOK: true, // not .NeedsConfig => shows Secret Manager badge & helper line
+		},
+		{
+			ID:            "jira",
+			Name:          "Atlassian Jira",
+			Description:   "Issue inspection and status transitions",
+			Connected:     true,
+			OAuthConfigOK: true, // not .NeedsConfig => shows Secret Manager badge
+		},
+		{
+			ID:          "notion",
+			Name:        "Notion (Notion MCP)",
+			Description: "Workspaces, databases, and pages via Notion API v1",
+			Connected:   true,
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	data := ui.DashboardPageData{
+		AdminEmail:  "admin@example.com",
+		ServiceURL:  "https://gateway.example.com",
+		MCPEndpoint: "https://gateway.example.com/mcp",
+		CSRFToken:   "csrf-notion-test",
+		Connectors:  connectors,
+	}
+
+	err := ui.RenderDashboard(rec, http.StatusOK, data)
+	if err != nil {
+		t.Fatalf("RenderDashboard failed: %v", err)
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	assertSecurityHeaders(t, rec)
+	body := rec.Body.String()
+
+	// 1. Notion Card Badges when Connected
+	if !strings.Contains(body, "ACTIVE (SECRET MANAGER)") {
+		t.Errorf("expected ACTIVE (SECRET MANAGER) badge on notion card")
+	}
+	if !strings.Contains(body, "NOTION API v1 (7 TOOLS)") {
+		t.Errorf("expected NOTION API v1 (7 TOOLS) badge on notion card")
+	}
+
+	// 2. Notion Capabilities row & Type row
+	if !strings.Contains(body, "Tools (7 Read/Write): Search Pages &amp; Databases, Read Page Properties, Read Block Content, Query Databases, Inspect Schemas, Create Pages, Append Blocks") &&
+		!strings.Contains(body, "Tools (7 Read/Write): Search Pages & Databases, Read Page Properties, Read Block Content, Query Databases, Inspect Schemas, Create Pages, Append Blocks") {
+		t.Errorf("expected Notion 7 Read/Write capabilities row in dashboard")
+	}
+	if !strings.Contains(body, "Managed Secret Manager Integration (NOTION_API_TOKEN)") {
+		t.Errorf("expected Managed Secret Manager Integration (NOTION_API_TOKEN) in Type row")
+	}
+
+	// 3. Notion Actions & Setup Guide button
+	if !strings.Contains(body, "Pre-configured via GCP Secret Manager (spark-notion-api-token). Ready for Gemini Spark") {
+		t.Errorf("expected Notion helper text on dashboard")
+	}
+	if !strings.Contains(body, `onclick="openTutorial('notion')"`) {
+		t.Errorf("expected Setup Guide button with openTutorial('notion')")
+	}
+
+	// 4. TUTORIAL_GUIDES Notion 3 steps & 7 tools
+	notionTools := []string{
+		"notion_search",
+		"notion_get_page",
+		"notion_get_block_children",
+		"notion_query_database",
+		"notion_get_database",
+		"notion_create_page",
+		"notion_append_block_children",
+	}
+	for _, tool := range notionTools {
+		if !strings.Contains(body, tool) {
+			t.Errorf("TUTORIAL_GUIDES missing expected Notion tool: %s", tool)
+		}
+	}
+	if !strings.Contains(body, "spark-notion-api-token") {
+		t.Errorf("TUTORIAL_GUIDES missing spark-notion-api-token")
+	}
+
+	// 5. GitHub & Jira Pre-Configured Secret Manager Badge (OAuth App Ready (Secret Manager))
+	if !strings.Contains(body, "OAuth App Ready (Secret Manager)") {
+		t.Errorf("expected OAuth App Ready (Secret Manager) badge for pre-configured OAuth")
+	}
+
+	// 6. Subtle helper line for pre-configured OAuth when not connected
+	if !strings.Contains(body, "OAuth Client ID &amp; Secret pre-configured in GCP Secret Manager") &&
+		!strings.Contains(body, "OAuth Client ID & Secret pre-configured in GCP Secret Manager") {
+		t.Errorf("expected helper line for pre-configured Secret Manager OAuth")
+	}
+	if !strings.Contains(body, "click Connect for 1-click sign-in") {
+		t.Errorf("expected 1-click sign-in helper text")
+	}
+
+	// 7. Verify disconnected Notion card renders "Not Connected"
+	disconnectedNotion := []ui.ConnectorView{
+		{
+			ID:        "notion",
+			Name:      "Notion",
+			Connected: false,
+		},
+	}
+	recDisc := httptest.NewRecorder()
+	err = ui.RenderDashboard(recDisc, http.StatusOK, ui.DashboardPageData{
+		Connectors: disconnectedNotion,
+	})
+	if err != nil {
+		t.Fatalf("RenderDashboard disconnected failed: %v", err)
+	}
+	discBody := recDisc.Body.String()
+	if !strings.Contains(discBody, "Not Connected") {
+		t.Errorf("expected Not Connected badge for disconnected Notion connector")
+	}
+}
+
+func TestRenderAuthorize_NotionScope(t *testing.T) {
+	connectors := []ui.ConnectorView{
+		{
+			ID:        "notion",
+			Name:      "Notion (Notion MCP)",
+			Connected: true,
+			ScopeMode: "full_access",
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	data := ui.AuthorizePageData{
+		ClientID:      "test-client-notion",
+		ClientName:    "Notion Test Client",
+		RedirectURI:   "https://client.example.com/cb",
+		DefaultPreset: "read_only",
+		CSRFToken:     "csrf-notion-auth",
+		Connectors:    connectors,
+	}
+
+	err := ui.RenderAuthorize(rec, http.StatusOK, data)
+	if err != nil {
+		t.Fatalf("RenderAuthorize failed: %v", err)
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	assertSecurityHeaders(t, rec)
+	body := rec.Body.String()
+
+	// 1. Upstream backend status card for Notion
+	if !strings.Contains(body, "ACTIVE (SECRET MANAGER)") {
+		t.Errorf("expected ACTIVE (SECRET MANAGER) badge in upstream backend status for Notion")
+	}
+
+	// 2. Notion scope dropdown in custom scope wrapper
+	if !strings.Contains(body, `name="scope_notion"`) {
+		t.Errorf("expected name=\"scope_notion\" in authorize page")
+	}
+	if !strings.Contains(body, `id="scope_notion"`) {
+		t.Errorf("expected id=\"scope_notion\" in authorize page")
+	}
+	if !strings.Contains(body, `value="read_only"`) {
+		t.Errorf("expected read_only option in scope_notion")
+	}
+	if !strings.Contains(body, `value="full_access"`) {
+		t.Errorf("expected full_access option in scope_notion")
+	}
+	if !strings.Contains(body, `value="none"`) {
+		t.Errorf("expected none option in scope_notion")
+	}
+}
