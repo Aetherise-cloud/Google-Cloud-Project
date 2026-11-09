@@ -21,6 +21,7 @@ import (
 	"spark-mcp-gateway/internal/config"
 	"spark-mcp-gateway/internal/store"
 	"spark-mcp-gateway/internal/ui"
+	"spark-mcp-gateway/internal/vault"
 )
 
 var controlCharRegex = regexp.MustCompile(`[\x00-\x1F\x7F<>"']`)
@@ -32,6 +33,7 @@ type OAuthServer struct {
 	session     *SessionManager
 	rateLimiter *IPRateLimiter
 	httpClient  *http.Client
+	vault       *vault.TokenVault
 
 	// Configurable endpoints for testing
 	GoogleTokenURL string
@@ -54,6 +56,11 @@ func NewOAuthServer(cfg *config.Config, s store.Store, httpClient *http.Client) 
 	}
 }
 
+// SetTokenVault sets the TokenVault used to decrypt and store provider tokens for consent and workspace settings.
+func (s *OAuthServer) SetTokenVault(v *vault.TokenVault) {
+	s.vault = v
+}
+
 // SetGoogleJWKSURL allows overriding the Google certs URL for unit testing.
 func (s *OAuthServer) SetGoogleJWKSURL(urlStr string) {
 	s.GoogleVerifier = NewGoogleOIDCVerifier(urlStr, s.httpClient)
@@ -72,10 +79,12 @@ func (s *OAuthServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
 
 	mux.HandleFunc("POST /api/oauth/register", s.handleRegisterClient)
+	mux.HandleFunc("POST /register", s.handleRegisterClient)
 	mux.HandleFunc("POST /api/oauth/clients/static", s.handleCreateStaticClient)
 	mux.HandleFunc("GET /authorize", s.handleAuthorizeGet)
 	mux.HandleFunc("POST /authorize", s.handleAuthorizePost)
 	mux.HandleFunc("POST /api/oauth/token", s.handleToken)
+	mux.HandleFunc("POST /token", s.handleToken)
 
 	mux.HandleFunc("GET /auth/login", s.handleLogin)
 	mux.HandleFunc("GET /auth/google/login", s.handleGoogleLogin)
@@ -475,8 +484,9 @@ func (s *OAuthServer) handleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 	connectors := []ui.ConnectorView{
 		{ID: "github", Name: "GitHub", Description: "Pull requests, code browsing, and issue creation", ScopeMode: "read_only"},
 		{ID: "jira", Name: "Atlassian Jira", Description: "Issue inspection and status transitions", ScopeMode: "read_only"},
-		{ID: "gcp", Name: "Google Cloud Run", Description: "Cloud Run inspection via keyless ADC", KeylessADC: true, Connected: true, ScopeMode: "read_only"},
+		{ID: "gcp", Name: "Google Cloud Platform (GCP MCP)", Description: "Read-only Cloud Run, Logging, Storage, Artifact Registry, Monitoring & IAM via keyless ADC", KeylessADC: true, Connected: true, ScopeMode: "read_only"},
 		{ID: "gdk", Name: "Google Developer Knowledge", Description: "Developer Knowledge documentation search via keyless ADC", KeylessADC: true, Connected: true, ScopeMode: "read_only"},
+		{ID: "gflow", Name: "Google Flow (gflow MCP)", Description: "AI image (Nano Banana / Imagen) & video (Veo) generation, upscaling & character catalog", KeylessADC: true, Connected: true, ScopeMode: "full_access"},
 	}
 
 	// Also load custom connectors and connection state for consent page
@@ -484,8 +494,24 @@ func (s *OAuthServer) handleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 		for _, conn := range conns {
 			if conn.Provider == "github" {
 				connectors[0].Connected = true
+				if s.vault != nil {
+					if tok, err := s.vault.DecryptConnection(r.Context(), conn); err == nil && tok != nil {
+						connectors[0].AccountLabel = tok.AccountLabel
+						connectors[0].SelectedOrgs = tok.SelectedOrgs
+						connectors[0].AllowedReadRepos = tok.AllowedReadRepos
+						connectors[0].AllowedWriteRepos = splitCSV(tok.AllowedWriteRepos)
+					}
+				}
 			} else if conn.Provider == "jira" {
 				connectors[1].Connected = true
+				if s.vault != nil {
+					if tok, err := s.vault.DecryptConnection(r.Context(), conn); err == nil && tok != nil {
+						connectors[1].AccountLabel = tok.AccountLabel
+						connectors[1].AllowedSpaceKeys = tok.AllowedSpaceKeys
+						connectors[1].SiteName = tok.SiteName
+						connectors[1].CloudID = tok.CloudID
+					}
+				}
 			} else if strings.HasPrefix(conn.Provider, "custom:") {
 				slug := strings.TrimPrefix(conn.Provider, "custom:")
 				connectors = append(connectors, ui.ConnectorView{
@@ -579,6 +605,52 @@ func (s *OAuthServer) handleAuthorizePost(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Update stored workspace picker settings if submitted
+	if s.vault != nil {
+		hasGH := false
+		var selOrgs, readRepos, writeRepos []string
+		if _, ok := r.Form["selected_orgs"]; ok {
+			selOrgs = parseFormStringSlice(r.Form, "selected_orgs")
+			hasGH = true
+		}
+		if _, ok := r.Form["allowed_read_repos"]; ok {
+			readRepos = parseFormStringSlice(r.Form, "allowed_read_repos")
+			hasGH = true
+		}
+		if _, ok := r.Form["allowed_write_repos"]; ok {
+			writeRepos = parseFormStringSlice(r.Form, "allowed_write_repos")
+			hasGH = true
+		}
+		if hasGH {
+			if conn, err := s.store.GetConnection(r.Context(), adminEmail, "github"); err == nil && conn != nil {
+				if tok, err := s.vault.DecryptConnection(r.Context(), conn); err == nil && tok != nil {
+					if _, ok := r.Form["selected_orgs"]; ok {
+						tok.SelectedOrgs = selOrgs
+					}
+					if _, ok := r.Form["allowed_read_repos"]; ok {
+						tok.AllowedReadRepos = readRepos
+					}
+					if _, ok := r.Form["allowed_write_repos"]; ok {
+						tok.AllowedWriteRepos = strings.Join(writeRepos, ",")
+					}
+					tok.UpdatedAt = time.Now()
+					_ = s.vault.StoreToken(r.Context(), adminEmail, "github", tok)
+				}
+			}
+		}
+
+		if _, ok := r.Form["allowed_space_keys"]; ok {
+			spaceKeys := parseFormStringSlice(r.Form, "allowed_space_keys")
+			if conn, err := s.store.GetConnection(r.Context(), adminEmail, "jira"); err == nil && conn != nil {
+				if tok, err := s.vault.DecryptConnection(r.Context(), conn); err == nil && tok != nil {
+					tok.AllowedSpaceKeys = spaceKeys
+					tok.UpdatedAt = time.Now()
+					_ = s.vault.StoreToken(r.Context(), adminEmail, "jira", tok)
+				}
+			}
+		}
+	}
+
 	// Calculate Scopes Map from preset
 	preset := r.FormValue("preset")
 	scopes := make(map[string]string)
@@ -588,21 +660,29 @@ func (s *OAuthServer) handleAuthorizePost(w http.ResponseWriter, r *http.Request
 		scopes["jira"] = "none"
 		scopes["gcp"] = "read_only"
 		scopes["gdk"] = "read_only"
+		scopes["gflow"] = "read_only"
 	case "full_access":
 		scopes["github"] = "full_access"
 		scopes["jira"] = "full_access"
 		scopes["gcp"] = "read_only"
 		scopes["gdk"] = "read_only"
+		scopes["gflow"] = "full_access"
 	case "custom":
 		scopes["github"] = r.FormValue("scope_github")
 		scopes["jira"] = r.FormValue("scope_jira")
 		scopes["gcp"] = r.FormValue("scope_gcp")
 		scopes["gdk"] = r.FormValue("scope_gdk")
+		gflowScope := r.FormValue("scope_gflow")
+		if gflowScope == "" {
+			gflowScope = "read_only"
+		}
+		scopes["gflow"] = gflowScope
 	default: // "read_only"
 		scopes["github"] = "read_only"
 		scopes["jira"] = "read_only"
 		scopes["gcp"] = "read_only"
 		scopes["gdk"] = "read_only"
+		scopes["gflow"] = "read_only"
 	}
 
 	// Also handle custom connectors
@@ -1156,4 +1236,44 @@ func (s *OAuthServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 func sha256Hex(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])
+}
+
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	var result []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+func parseFormStringSlice(form url.Values, key string) []string {
+	vals, exists := form[key]
+	if !exists || len(vals) == 0 {
+		return nil
+	}
+	var res []string
+	for _, v := range vals {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		if strings.Contains(v, ",") {
+			for _, part := range strings.Split(v, ",") {
+				part = strings.TrimSpace(part)
+				if part != "" {
+					res = append(res, part)
+				}
+			}
+		} else {
+			res = append(res, v)
+		}
+	}
+	return res
 }
