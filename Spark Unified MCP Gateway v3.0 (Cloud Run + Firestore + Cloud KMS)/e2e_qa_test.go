@@ -922,3 +922,761 @@ func TestFullStackE2E(t *testing.T) {
 	})
 	_ = ctx
 }
+
+// -----------------------------------------------------------------------------
+// V4 Developer Fix Manual End-to-End QA Verification (In-Memory, Zero TCP Sockets)
+// -----------------------------------------------------------------------------
+
+type mockRoundTripper func(*http.Request) (*http.Response, error)
+
+func (m mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return m(req)
+}
+
+func mockJSONResponse(req *http.Request, status int, data interface{}) (*http.Response, error) {
+	b, _ := json.Marshal(data)
+	return &http.Response{
+		StatusCode: status,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(bytes.NewReader(b)),
+		Request:    req,
+	}, nil
+}
+
+func TestV4DeveloperFixManualE2E(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. In-Memory Mock Upstream RoundTripper (Zero Sockets Bound)
+	rt := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		// Mock GitHub API
+		if req.URL.Host == "mock-github.internal" {
+			if req.URL.Path == "/user/orgs" {
+				return mockJSONResponse(req, http.StatusOK, []map[string]string{
+					{"login": "aetherise-cloud"},
+				})
+			}
+			if req.URL.Path == "/user/repos" || req.URL.Path == "/orgs/aetherise-cloud/repos" {
+				return mockJSONResponse(req, http.StatusOK, []map[string]string{
+					{"full_name": "aetherise-cloud/spark-mcp-gateway"},
+				})
+			}
+			if strings.HasPrefix(req.URL.Path, "/repos/aetherise-cloud/spark-mcp-gateway/pulls") {
+				return mockJSONResponse(req, http.StatusOK, []map[string]interface{}{
+					{"number": 101, "title": "feat: V4 PR", "state": "open"},
+				})
+			}
+			return mockJSONResponse(req, http.StatusNotFound, map[string]string{"message": "not found"})
+		}
+
+		// Mock Jira API
+		if req.URL.Host == "mock-jira.internal" {
+			if strings.HasSuffix(req.URL.Path, "/project/search") {
+				return mockJSONResponse(req, http.StatusOK, map[string]interface{}{
+					"values": []map[string]string{
+						{"key": "SPARK", "name": "Spark Core"},
+						{"key": "ONB", "name": "Onboarding"},
+					},
+				})
+			}
+			if req.Method == "POST" && strings.HasSuffix(req.URL.Path, "/issue") {
+				return mockJSONResponse(req, http.StatusCreated, map[string]interface{}{
+					"id":   "10001",
+					"key":  "SPARK-101",
+					"self": "https://mock-jira.internal/rest/api/3/issue/10001",
+				})
+			}
+			if strings.HasSuffix(req.URL.Path, "/search") {
+				return mockJSONResponse(req, http.StatusOK, map[string]interface{}{
+					"issues": []map[string]interface{}{
+						{
+							"id":  "10001",
+							"key": "SPARK-101",
+							"fields": map[string]interface{}{
+								"summary": "Spark Test Issue",
+								"status":  map[string]string{"name": "In Progress"},
+							},
+						},
+					},
+				})
+			}
+			return mockJSONResponse(req, http.StatusNotFound, map[string]string{"message": "not found"})
+		}
+
+		// Mock Cloud Run API
+		if req.URL.Host == "mock-cloudrun.internal" {
+			if strings.Contains(req.URL.Path, "/services/spark-gateway") {
+				return mockJSONResponse(req, http.StatusOK, map[string]interface{}{
+					"name":       "projects/test-gcp-project/locations/us-central1/services/spark-gateway",
+					"uri":        "https://spark-gateway.run.app",
+					"ingress":    "INGRESS_TRAFFIC_ALL",
+					"createTime": "2026-11-09T00:00:00Z",
+					"updateTime": "2026-11-09T01:00:00Z",
+					"template": map[string]interface{}{
+						"serviceAccount": "spark-sa@test-gcp-project.iam.gserviceaccount.com",
+						"scaling":        map[string]interface{}{"minInstanceCount": 1, "maxInstanceCount": 10},
+						"containers": []map[string]interface{}{
+							{
+								"image": "gcr.io/test-gcp-project/spark-gateway:v4",
+								"resources": map[string]interface{}{
+									"limits": map[string]string{"cpu": "2", "memory": "1Gi"},
+								},
+								"env": []map[string]string{
+									{"name": "DATABASE_PASSWORD", "value": "super-secret-password-123"},
+									{"name": "API_KEY", "value": "secret-api-key-xyz"},
+								},
+								"secret_key_ref": map[string]string{
+									"secret":  "db-secret",
+									"version": "latest",
+								},
+								"volumeMounts": []map[string]string{
+									{"name": "secret-volume", "mountPath": "/etc/secrets"},
+								},
+								"secrets": []map[string]string{
+									{"name": "private-key", "path": "tls.key"},
+								},
+							},
+						},
+					},
+					"traffic": []map[string]interface{}{
+						{"percent": 100, "type": "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"},
+					},
+				})
+			}
+			return mockJSONResponse(req, http.StatusNotFound, map[string]string{"message": "not found"})
+		}
+
+		return mockJSONResponse(req, http.StatusNotFound, map[string]string{"message": "unknown host"})
+	})
+
+	inMemoryClient := &http.Client{Transport: rt}
+
+	// 2. Initialize In-Memory Gateway Core
+	jwtPrivKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed generating ECDSA key: %v", err)
+	}
+
+	sessionKey := make([]byte, 32)
+	_, _ = rand.Read(sessionKey)
+
+	kms, err := vault.NewLocalAEADKMS(sessionKey)
+	if err != nil {
+		t.Fatalf("failed initializing Local AEAD KMS: %v", err)
+	}
+
+	st := store.NewMemoryStore()
+	tokenVault := vault.NewTokenVault("v4-inmemory-inst", st, kms, "test-kek", nil)
+
+	cfg := &config.Config{
+		ServiceURL:         "https://spark-gateway.internal",
+		Port:               "8080",
+		AdminAllowedEmails: []string{"brendon.ang20011007@gmail.com"},
+		SessionHMACKey:     sessionKey,
+		JWTES256PrivateKey: jwtPrivKey,
+		DevMode:            true,
+		GCPProjectID:       "test-gcp-project",
+		GCPRegion:          "us-central1",
+	}
+
+	toolRegistry := providers.NewRegistry(cfg, inMemoryClient, func(ctx context.Context) (string, error) {
+		return "mock-adc-token", nil
+	})
+	toolRegistry.GitHubBaseURL = "https://mock-github.internal"
+	toolRegistry.JiraBaseURL = "https://mock-jira.internal"
+	toolRegistry.CloudRunBaseURL = "https://mock-cloudrun.internal"
+
+	authServer := auth.NewOAuthServer(cfg, st, inMemoryClient)
+	broker := oauthbroker.NewBroker(cfg, st, tokenVault, authServer.SessionManager(), inMemoryClient)
+	broker.GitHubAPIURL = "https://mock-github.internal"
+	broker.AtlassianAPIURL = "https://mock-jira.internal"
+	broker.AllowLoopbackForTest = true
+
+	mcpServer := mcp.NewServer(cfg, toolRegistry, tokenVault, st)
+	mcpServer.AllowLoopbackForTest = true
+
+	mux := http.NewServeMux()
+	authServer.RegisterRoutes(mux)
+	broker.RegisterRoutes(mux)
+	mux.Handle("/mcp", mcpServer)
+
+	// Simulated downstream 503 handler
+	mux.HandleFunc("POST /mcp/simulate-coldstart", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("Service Unavailable: container cold-starting"))
+	})
+	mux.HandleFunc("POST /mcp/simulate-panic", func(w http.ResponseWriter, r *http.Request) {
+		panic("simulated unhandled panic in MCP handler")
+	})
+
+	handler := mcp.JSONErrorMiddleware(mux)
+
+	adminEmail := "brendon.ang20011007@gmail.com"
+	var adminCookie *http.Cookie
+	var csrfToken string
+	var clientID, clientSecret string
+	var jwtToken string
+
+	// =========================================================================
+	// FLOW 1: OAuth 2.1 DCR & Interactive Workspace Picker
+	// =========================================================================
+	t.Run("V4_Flow1_OAuth21DCRAndWorkspacePicker", func(t *testing.T) {
+		// 1.1 POST /register (RFC 7591 root alias)
+		regBody := `{"client_name":"Gemini Web Client","redirect_uris":["https://gemini.google.com/callback"]}`
+		reqReg := httptest.NewRequest("POST", "/register", strings.NewReader(regBody))
+		reqReg.Header.Set("Content-Type", "application/json")
+		recReg := httptest.NewRecorder()
+		handler.ServeHTTP(recReg, reqReg)
+
+		if recReg.Code != http.StatusCreated {
+			t.Fatalf("POST /register returned %d, want 201 Created: %s", recReg.Code, recReg.Body.String())
+		}
+		var regResp struct {
+			ClientID     string `json:"client_id"`
+			ClientSecret string `json:"client_secret"`
+		}
+		_ = json.NewDecoder(recReg.Body).Decode(&regResp)
+		if !strings.HasPrefix(regResp.ClientID, "spark-client-") {
+			t.Errorf("expected client_id starting with 'spark-client-', got %q", regResp.ClientID)
+		}
+		clientID = regResp.ClientID
+		clientSecret = regResp.ClientSecret
+
+		// 1.2 Admin login & CSRF token
+		loginForm := url.Values{"email": {adminEmail}}
+		reqLogin := httptest.NewRequest("POST", "/auth/dev/login", strings.NewReader(loginForm.Encode()))
+		reqLogin.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		recLogin := httptest.NewRecorder()
+		handler.ServeHTTP(recLogin, reqLogin)
+
+		if recLogin.Code != http.StatusFound {
+			t.Fatalf("POST /auth/dev/login returned %d, want 302 Found", recLogin.Code)
+		}
+		for _, c := range recLogin.Result().Cookies() {
+			if strings.Contains(c.Name, "spark_admin") {
+				adminCookie = c
+				break
+			}
+		}
+		if adminCookie == nil {
+			t.Fatalf("session cookie not found, cookies: %v", recLogin.Result().Cookies())
+		}
+		csrfToken = authServer.SessionManager().GenerateCSRFToken(adminEmail)
+
+		// 1.3 Pre-store active tokens for GitHub and Jira so workspaces can be queried
+		ghTok := &vault.TokenData{
+			AccessToken:   "example-pat-token-123",
+			ConnectorType: "oauth2",
+			Scope:         "full_access",
+			AccountLabel:  "octocat",
+			UpdatedAt:     time.Now(),
+		}
+		if err := tokenVault.StoreToken(ctx, adminEmail, "github", ghTok); err != nil {
+			t.Fatalf("failed storing gh token: %v", err)
+		}
+
+		jiraTok := &vault.TokenData{
+			AccessToken:   "example-jira-token-456",
+			ConnectorType: "oauth2",
+			Scope:         "full_access",
+			CloudID:       "jira-cloud-123",
+			SiteURL:       "https://aetherise.atlassian.net",
+			SiteName:      "Aetherise Jira",
+			AccountLabel:  "admin@aetherise.com",
+			UpdatedAt:     time.Now(),
+		}
+		if err := tokenVault.StoreToken(ctx, adminEmail, "jira", jiraTok); err != nil {
+			t.Fatalf("failed storing jira token: %v", err)
+		}
+
+		// 1.4 GET /api/connectors/github/workspaces
+		reqGHWork := httptest.NewRequest("GET", "/api/connectors/github/workspaces", nil)
+		reqGHWork.AddCookie(adminCookie)
+		recGHWork := httptest.NewRecorder()
+		handler.ServeHTTP(recGHWork, reqGHWork)
+
+		if recGHWork.Code != http.StatusOK {
+			t.Fatalf("GET /api/connectors/github/workspaces returned %d: %s", recGHWork.Code, recGHWork.Body.String())
+		}
+		var ghWorkResp struct {
+			Orgs  []string `json:"orgs"`
+			Repos []string `json:"repos"`
+		}
+		_ = json.NewDecoder(recGHWork.Body).Decode(&ghWorkResp)
+		if len(ghWorkResp.Orgs) == 0 || ghWorkResp.Orgs[0] != "aetherise-cloud" {
+			t.Errorf("expected org 'aetherise-cloud', got: %v", ghWorkResp.Orgs)
+		}
+		if len(ghWorkResp.Repos) == 0 || ghWorkResp.Repos[0] != "aetherise-cloud/spark-mcp-gateway" {
+			t.Errorf("expected repo 'aetherise-cloud/spark-mcp-gateway', got: %v", ghWorkResp.Repos)
+		}
+
+		// 1.5 GET /api/connectors/jira/workspaces
+		reqJiraWork := httptest.NewRequest("GET", "/api/connectors/jira/workspaces", nil)
+		reqJiraWork.AddCookie(adminCookie)
+		recJiraWork := httptest.NewRecorder()
+		handler.ServeHTTP(recJiraWork, reqJiraWork)
+
+		if recJiraWork.Code != http.StatusOK {
+			t.Fatalf("GET /api/connectors/jira/workspaces returned %d: %s", recJiraWork.Code, recJiraWork.Body.String())
+		}
+		var jiraWorkResp struct {
+			Spaces []struct {
+				Key  string `json:"key"`
+				Name string `json:"name"`
+			} `json:"spaces"`
+		}
+		_ = json.NewDecoder(recJiraWork.Body).Decode(&jiraWorkResp)
+		if len(jiraWorkResp.Spaces) < 2 || jiraWorkResp.Spaces[0].Key != "SPARK" {
+			t.Errorf("expected Jira spaces [SPARK, ONB], got: %+v", jiraWorkResp.Spaces)
+		}
+
+		// 1.6 POST /api/connectors/workspaces (GitHub)
+		saveGHBody := fmt.Sprintf(`{
+			"provider": "github",
+			"csrf_token": %q,
+			"selected_orgs": ["aetherise-cloud"],
+			"allowed_read_repos": ["aetherise-cloud/*"],
+			"allowed_write_repos": ["aetherise-cloud/spark-mcp-gateway"]
+		}`, csrfToken)
+		reqSaveGH := httptest.NewRequest("POST", "/api/connectors/workspaces", strings.NewReader(saveGHBody))
+		reqSaveGH.Header.Set("Content-Type", "application/json")
+		reqSaveGH.AddCookie(adminCookie)
+		recSaveGH := httptest.NewRecorder()
+		handler.ServeHTTP(recSaveGH, reqSaveGH)
+
+		if recSaveGH.Code != http.StatusOK {
+			t.Fatalf("POST /api/connectors/workspaces (github) returned %d: %s", recSaveGH.Code, recSaveGH.Body.String())
+		}
+
+		// 1.7 POST /api/connectors/workspaces (Jira)
+		saveJiraBody := fmt.Sprintf(`{
+			"provider": "jira",
+			"csrf_token": %q,
+			"allowed_space_keys": ["SPARK"]
+		}`, csrfToken)
+		reqSaveJira := httptest.NewRequest("POST", "/api/connectors/workspaces", strings.NewReader(saveJiraBody))
+		reqSaveJira.Header.Set("Content-Type", "application/json")
+		reqSaveJira.AddCookie(adminCookie)
+		recSaveJira := httptest.NewRecorder()
+		handler.ServeHTTP(recSaveJira, reqSaveJira)
+
+		if recSaveJira.Code != http.StatusOK {
+			t.Fatalf("POST /api/connectors/workspaces (jira) returned %d: %s", recSaveJira.Code, recSaveJira.Body.String())
+		}
+
+		// Verify TokenVault has saved workspaces
+		savedGH, err := tokenVault.GetValidAccessToken(ctx, adminEmail, "github")
+		if err != nil || len(savedGH.SelectedOrgs) == 0 || savedGH.SelectedOrgs[0] != "aetherise-cloud" {
+			t.Fatalf("TokenVault did not store selected_orgs properly: %+v", savedGH)
+		}
+		savedJira, err := tokenVault.GetValidAccessToken(ctx, adminEmail, "jira")
+		if err != nil || len(savedJira.AllowedSpaceKeys) == 0 || savedJira.AllowedSpaceKeys[0] != "SPARK" {
+			t.Fatalf("TokenVault did not store allowed_space_keys properly: %+v", savedJira)
+		}
+
+		// 1.8 Authorize & Token Root Alias (POST /token)
+		codeVerifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk-very-long-verifier-123456789"
+		h := sha256.Sum256([]byte(codeVerifier))
+		codeChallenge := base64.RawURLEncoding.EncodeToString(h[:])
+
+		authForm := url.Values{
+			"client_id":             {clientID},
+			"redirect_uri":          {"https://gemini.google.com/callback"},
+			"response_type":         {"code"},
+			"state":                 {"v4-state-123"},
+			"code_challenge":        {codeChallenge},
+			"code_challenge_method": {"S256"},
+			"decision":              {"approve"},
+			"preset":                {"full_access"},
+			"csrf_token":            {csrfToken},
+		}
+		reqAuth := httptest.NewRequest("POST", "/authorize", strings.NewReader(authForm.Encode()))
+		reqAuth.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		reqAuth.AddCookie(adminCookie)
+		recAuth := httptest.NewRecorder()
+		handler.ServeHTTP(recAuth, reqAuth)
+
+		if recAuth.Code != http.StatusFound {
+			t.Fatalf("POST /authorize returned %d, want 302 Found: %s", recAuth.Code, recAuth.Body.String())
+		}
+		loc := recAuth.Header().Get("Location")
+		uLoc, _ := url.Parse(loc)
+		authCode := uLoc.Query().Get("code")
+		if authCode == "" {
+			t.Fatalf("missing authorization code in redirect Location: %s", loc)
+		}
+
+		// Token exchange via root alias POST /token
+		tokenForm := url.Values{
+			"grant_type":    {"authorization_code"},
+			"code":          {authCode},
+			"redirect_uri":  {"https://gemini.google.com/callback"},
+			"client_id":     {clientID},
+			"code_verifier": {codeVerifier},
+		}
+		reqToken := httptest.NewRequest("POST", "/token", strings.NewReader(tokenForm.Encode()))
+		reqToken.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if clientSecret != "" {
+			reqToken.SetBasicAuth(clientID, clientSecret)
+		}
+		recToken := httptest.NewRecorder()
+		handler.ServeHTTP(recToken, reqToken)
+
+		if recToken.Code != http.StatusOK {
+			t.Fatalf("POST /token returned %d: %s", recToken.Code, recToken.Body.String())
+		}
+		var tokResp struct {
+			AccessToken string `json:"access_token"`
+			TokenType   string `json:"token_type"`
+		}
+		_ = json.NewDecoder(recToken.Body).Decode(&tokResp)
+		if tokResp.AccessToken == "" {
+			t.Fatalf("empty access_token received from /token")
+		}
+		jwtToken = tokResp.AccessToken
+
+		// Verify ES256 JWT claims
+		claims, err := auth.VerifyJWT(jwtToken, &jwtPrivKey.PublicKey, cfg.ServiceURL, cfg.ServiceURL+"/mcp")
+		if err != nil {
+			t.Fatalf("VerifyJWT failed: %v", err)
+		}
+		if claims.Scopes["github"] != "full_access" || claims.Scopes["jira"] != "full_access" {
+			t.Errorf("expected full_access scopes, got: %+v", claims.Scopes)
+		}
+
+		// 1.9 GET /dashboard renders badges and #workspace-modal
+		reqDash := httptest.NewRequest("GET", "/dashboard", nil)
+		reqDash.AddCookie(adminCookie)
+		recDash := httptest.NewRecorder()
+		handler.ServeHTTP(recDash, reqDash)
+
+		if recDash.Code != http.StatusOK {
+			t.Fatalf("GET /dashboard returned %d", recDash.Code)
+		}
+		dashHTML := recDash.Body.String()
+		if !strings.Contains(dashHTML, "aetherise-cloud") {
+			t.Errorf("dashboard missing 'aetherise-cloud' org badge")
+		}
+		if !strings.Contains(dashHTML, "SPARK") {
+			t.Errorf("dashboard missing 'SPARK' Jira space badge")
+		}
+		if !strings.Contains(dashHTML, "workspace-modal") {
+			t.Errorf("dashboard missing '#workspace-modal' element")
+		}
+
+		t.Log("PASS: Flow 1 - DCR POST /register, Workspaces Discovery, POST /token, and Dashboard Badges validated.")
+	})
+
+	// =========================================================================
+	// FLOW 2: Hot-Path Scope & Write Guardrails + New Jira Tools
+	// =========================================================================
+	t.Run("V4_Flow2_GuardrailsAndNewTools", func(t *testing.T) {
+		// 2.1 Allowed GitHub PR list
+		callAllowedPR := `{
+			"jsonrpc": "2.0",
+			"id": 201,
+			"method": "tools/call",
+			"params": {
+				"name": "github_list_prs",
+				"arguments": {
+					"owner": "aetherise-cloud",
+					"repo": "spark-mcp-gateway"
+				}
+			}
+		}`
+		reqPR1 := httptest.NewRequest("POST", "/mcp", strings.NewReader(callAllowedPR))
+		reqPR1.Header.Set("Content-Type", "application/json")
+		reqPR1.Header.Set("Authorization", "Bearer "+jwtToken)
+		recPR1 := httptest.NewRecorder()
+		handler.ServeHTTP(recPR1, reqPR1)
+
+		if recPR1.Code != http.StatusOK {
+			t.Fatalf("POST /mcp github_list_prs (allowed) returned %d: %s", recPR1.Code, recPR1.Body.String())
+		}
+		var rpcPR1 struct {
+			Result struct {
+				IsError bool `json:"isError"`
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"result"`
+		}
+		_ = json.NewDecoder(recPR1.Body).Decode(&rpcPR1)
+		if rpcPR1.Result.IsError || !strings.Contains(rpcPR1.Result.Content[0].Text, "feat: V4 PR") {
+			t.Errorf("expected allowed PR list to succeed, got: %+v", rpcPR1)
+		}
+
+		// 2.2 Blocked GitHub PR list (outside SelectedOrgs/AllowedReadRepos)
+		callBlockedPR := `{
+			"jsonrpc": "2.0",
+			"id": 202,
+			"method": "tools/call",
+			"params": {
+				"name": "github_list_prs",
+				"arguments": {
+					"owner": "evil-org",
+					"repo": "secret-repo"
+				}
+			}
+		}`
+		reqPR2 := httptest.NewRequest("POST", "/mcp", strings.NewReader(callBlockedPR))
+		reqPR2.Header.Set("Content-Type", "application/json")
+		reqPR2.Header.Set("Authorization", "Bearer "+jwtToken)
+		recPR2 := httptest.NewRecorder()
+		handler.ServeHTTP(recPR2, reqPR2)
+
+		var rpcPR2 struct {
+			Result struct {
+				IsError bool `json:"isError"`
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"result"`
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.NewDecoder(recPR2.Body).Decode(&rpcPR2)
+		outText := ""
+		if len(rpcPR2.Result.Content) > 0 {
+			outText = rpcPR2.Result.Content[0].Text
+		} else if rpcPR2.Error != nil {
+			outText = rpcPR2.Error.Message
+		}
+		if !rpcPR2.Result.IsError && !strings.Contains(outText, "not in allowed GitHub read scope") {
+			t.Errorf("expected blocked PR request to fail, got: %s", outText)
+		}
+
+		// 2.3 Allowed Jira Create Issue (SPARK)
+		callJiraCreate := `{
+			"jsonrpc": "2.0",
+			"id": 203,
+			"method": "tools/call",
+			"params": {
+				"name": "jira_create_issue",
+				"arguments": {
+					"project_key": "SPARK",
+					"summary": "Implement V4 Feature"
+				}
+			}
+		}`
+		reqJiraCreate := httptest.NewRequest("POST", "/mcp", strings.NewReader(callJiraCreate))
+		reqJiraCreate.Header.Set("Content-Type", "application/json")
+		reqJiraCreate.Header.Set("Authorization", "Bearer "+jwtToken)
+		recJiraCreate := httptest.NewRecorder()
+		handler.ServeHTTP(recJiraCreate, reqJiraCreate)
+
+		var rpcJiraCreate struct {
+			Result struct {
+				IsError bool `json:"isError"`
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"result"`
+		}
+		_ = json.NewDecoder(recJiraCreate.Body).Decode(&rpcJiraCreate)
+		if rpcJiraCreate.Result.IsError || !strings.Contains(rpcJiraCreate.Result.Content[0].Text, "SPARK-101") {
+			t.Errorf("expected jira_create_issue to succeed, got: %+v", rpcJiraCreate)
+		}
+
+		// 2.4 Allowed Jira Search Issues (SPARK)
+		callJiraSearch := `{
+			"jsonrpc": "2.0",
+			"id": 204,
+			"method": "tools/call",
+			"params": {
+				"name": "jira_search_issues",
+				"arguments": {
+					"project_key": "SPARK"
+				}
+			}
+		}`
+		reqJiraSearch := httptest.NewRequest("POST", "/mcp", strings.NewReader(callJiraSearch))
+		reqJiraSearch.Header.Set("Content-Type", "application/json")
+		reqJiraSearch.Header.Set("Authorization", "Bearer "+jwtToken)
+		recJiraSearch := httptest.NewRecorder()
+		handler.ServeHTTP(recJiraSearch, reqJiraSearch)
+
+		var rpcJiraSearch struct {
+			Result struct {
+				IsError bool `json:"isError"`
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"result"`
+		}
+		_ = json.NewDecoder(recJiraSearch.Body).Decode(&rpcJiraSearch)
+		if rpcJiraSearch.Result.IsError || !strings.Contains(rpcJiraSearch.Result.Content[0].Text, "SPARK-101") {
+			t.Errorf("expected jira_search_issues to succeed, got: %+v", rpcJiraSearch)
+		}
+
+		// 2.5 Blocked Jira Get Issue (FORBIDDEN-1)
+		callJiraBlock := `{
+			"jsonrpc": "2.0",
+			"id": 205,
+			"method": "tools/call",
+			"params": {
+				"name": "jira_get_issue",
+				"arguments": {
+					"issue_key": "FORBIDDEN-1"
+				}
+			}
+		}`
+		reqJiraBlock := httptest.NewRequest("POST", "/mcp", strings.NewReader(callJiraBlock))
+		reqJiraBlock.Header.Set("Content-Type", "application/json")
+		reqJiraBlock.Header.Set("Authorization", "Bearer "+jwtToken)
+		recJiraBlock := httptest.NewRecorder()
+		handler.ServeHTTP(recJiraBlock, reqJiraBlock)
+
+		var rpcJiraBlock struct {
+			Result struct {
+				IsError bool `json:"isError"`
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"result"`
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.NewDecoder(recJiraBlock.Body).Decode(&rpcJiraBlock)
+		jiraErr := ""
+		if len(rpcJiraBlock.Result.Content) > 0 {
+			jiraErr = rpcJiraBlock.Result.Content[0].Text
+		} else if rpcJiraBlock.Error != nil {
+			jiraErr = rpcJiraBlock.Error.Message
+		}
+		if !rpcJiraBlock.Result.IsError && !strings.Contains(jiraErr, "not in allowed_space_keys") {
+			t.Errorf("expected FORBIDDEN-1 to be blocked, got: %s", jiraErr)
+		}
+
+		// 2.6 GCP Cloud Run Redaction
+		callCloudRun := `{
+			"jsonrpc": "2.0",
+			"id": 206,
+			"method": "tools/call",
+			"params": {
+				"name": "gcp_get_cloudrun_service",
+				"arguments": {
+					"service_name": "spark-gateway"
+				}
+			}
+		}`
+		reqCR := httptest.NewRequest("POST", "/mcp", strings.NewReader(callCloudRun))
+		reqCR.Header.Set("Content-Type", "application/json")
+		reqCR.Header.Set("Authorization", "Bearer "+jwtToken)
+		recCR := httptest.NewRecorder()
+		handler.ServeHTTP(recCR, reqCR)
+
+		if recCR.Code != http.StatusOK {
+			t.Fatalf("POST /mcp gcp_get_cloudrun_service returned %d: %s", recCR.Code, recCR.Body.String())
+		}
+		var rpcCR struct {
+			Result struct {
+				IsError bool `json:"isError"`
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"result"`
+		}
+		_ = json.NewDecoder(recCR.Body).Decode(&rpcCR)
+		crText := rpcCR.Result.Content[0].Text
+
+		if !strings.Contains(crText, "spark-gateway") {
+			t.Errorf("cloud run output missing service name: %s", crText)
+		}
+		sensitiveTokens := []string{
+			"super-secret-password-123",
+			"secret-api-key-xyz",
+			"db-secret",
+			"secret-volume",
+			"tls.key",
+		}
+		for _, token := range sensitiveTokens {
+			if strings.Contains(crText, token) {
+				t.Errorf("leak detected! output contains sensitive token %q", token)
+			}
+		}
+
+		t.Log("PASS: Flow 2 - Scope guardrails for GitHub/Jira and Cloud Run secret redaction verified.")
+	})
+
+	// =========================================================================
+	// FLOW 3: Anti-503 JSON-RPC Middleware, 401 Auto-Refresh & Clickable Re-Auth
+	// =========================================================================
+	t.Run("V4_Flow3_Anti503AndAuthErrors", func(t *testing.T) {
+		// 3.1 Unauthenticated POST /mcp returns HTTP 401 with WWW-Authenticate & JSON-RPC 2.0 error -32001
+		unauthReq := httptest.NewRequest("POST", "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":301,"method":"tools/list"}`))
+		unauthReq.Header.Set("Content-Type", "application/json")
+		recUnauth := httptest.NewRecorder()
+		handler.ServeHTTP(recUnauth, unauthReq)
+
+		if recUnauth.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 Unauthorized for unauth /mcp, got %d", recUnauth.Code)
+		}
+		wwwAuth := recUnauth.Header().Get("WWW-Authenticate")
+		if !strings.Contains(wwwAuth, "Bearer resource_metadata=") {
+			t.Errorf("expected WWW-Authenticate header with resource_metadata, got %q", wwwAuth)
+		}
+		var unauthResp struct {
+			JSONRPC string `json:"jsonrpc"`
+			Error   struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.NewDecoder(recUnauth.Body).Decode(&unauthResp)
+		if unauthResp.JSONRPC != "2.0" || unauthResp.Error.Code != -32001 {
+			t.Errorf("expected JSON-RPC 2.0 error code -32001, got %+v", unauthResp)
+		}
+
+		// 3.2 Simulated 503 downstream failure wrapped by JSONErrorMiddleware returns HTTP 503 JSON-RPC code -32003
+		coldReq := httptest.NewRequest("POST", "/mcp/simulate-coldstart", strings.NewReader(`{"jsonrpc":"2.0","id":302,"method":"tools/list"}`))
+		coldReq.Header.Set("Content-Type", "application/json")
+		coldReq.Header.Set("Accept", "application/json")
+		recCold := httptest.NewRecorder()
+		handler.ServeHTTP(recCold, coldReq)
+
+		if recCold.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503 Service Unavailable, got %d", recCold.Code)
+		}
+		if !strings.Contains(recCold.Header().Get("Content-Type"), "application/json") {
+			t.Errorf("expected application/json Content-Type, got %q", recCold.Header().Get("Content-Type"))
+		}
+		var coldResp struct {
+			JSONRPC string `json:"jsonrpc"`
+			Error   struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.NewDecoder(recCold.Body).Decode(&coldResp)
+		if coldResp.JSONRPC != "2.0" || coldResp.Error.Code != -32003 {
+			t.Errorf("expected JSON-RPC 2.0 error code -32003, got %+v", coldResp)
+		}
+		if !strings.Contains(coldResp.Error.Message, "Upstream service temporarily unavailable or cold-starting") {
+			t.Errorf("unexpected error message: %s", coldResp.Error.Message)
+		}
+
+		// 3.3 Panic recovery to JSON-RPC 503
+		panicReq := httptest.NewRequest("POST", "/mcp/simulate-panic", strings.NewReader(`{"jsonrpc":"2.0","id":303,"method":"tools/list"}`))
+		panicReq.Header.Set("Content-Type", "application/json")
+		recPanic := httptest.NewRecorder()
+		handler.ServeHTTP(recPanic, panicReq)
+
+		if recPanic.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503 from recovered panic, got %d", recPanic.Code)
+		}
+		var panicResp struct {
+			Error struct {
+				Code int `json:"code"`
+			} `json:"error"`
+		}
+		_ = json.NewDecoder(recPanic.Body).Decode(&panicResp)
+		if panicResp.Error.Code != -32003 {
+			t.Errorf("expected code -32003 from panic recovery, got %+v", panicResp)
+		}
+
+		t.Log("PASS: Flow 3 - Anti-503 JSON-RPC Middleware, WWW-Authenticate header, and panic recovery validated.")
+	})
+}
