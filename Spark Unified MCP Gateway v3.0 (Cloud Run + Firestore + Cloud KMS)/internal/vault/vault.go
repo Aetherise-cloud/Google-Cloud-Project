@@ -27,6 +27,17 @@ type TokenData struct {
 	SiteURL      string    `json:"site_url,omitempty"`      // For Jira Cloud
 	AccountLabel string    `json:"account_label,omitempty"` // User handle/email
 	UpdatedAt    time.Time `json:"updated_at,omitempty"`
+
+	// Optional dynamic configuration & custom connector fields
+	ConnectorName     string `json:"connector_name,omitempty"`
+	Description       string `json:"description,omitempty"`
+	ConnectorType     string `json:"connector_type,omitempty"` // "oauth2", "pat", "remote_mcp", "rest_api"
+	TemplateID        string `json:"template_id,omitempty"`
+	EndpointURL       string `json:"endpoint_url,omitempty"`
+	AuthHeader        string `json:"auth_header,omitempty"` // e.g. "Authorization" or "X-API-Key"
+	OAuthClientID     string `json:"oauth_client_id,omitempty"`
+	OAuthClientSecret string `json:"oauth_client_secret,omitempty"`
+	AllowedWriteRepos string `json:"allowed_write_repos,omitempty"`
 }
 
 type cachedItem struct {
