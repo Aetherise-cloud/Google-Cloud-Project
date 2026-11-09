@@ -63,10 +63,16 @@
           <div style="background-color: #0b111e; border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 12px; display: flex; justify-content: space-between; align-items: center;">
             <div>
               <div style="font-weight: 600; font-size: 0.9rem;">{{.Name}}</div>
-              <div class="text-muted" style="font-size: 0.78rem;">{{if .KeylessADC}}Google ADC{{else}}{{.AccountLabel}}{{end}}</div>
+              <div class="text-muted" style="font-size: 0.78rem;">{{if eq .ID "notion"}}Secret Manager (spark-notion-api-token){{else if .KeylessADC}}Google ADC{{else}}{{.AccountLabel}}{{end}}</div>
             </div>
             <div>
-              {{if .KeylessADC}}
+              {{if eq .ID "notion"}}
+                {{if .Connected}}
+                  <span class="badge badge-adc">ACTIVE (SECRET MANAGER)</span>
+                {{else}}
+                  <span class="badge badge-disconnected">Not Connected</span>
+                {{end}}
+              {{else if .KeylessADC}}
                 <span class="badge badge-adc">Active (Keyless ADC)</span>
               {{else}}
                 {{if .Connected}}
@@ -139,6 +145,12 @@
               <option value="full_access" selected>Full Access (AI Image &amp; Video Generation + Catalog)</option>
               <option value="read_only">Read Only (Models, Projects, Characters &amp; Credits Only)</option>
               <option value="none">None (Disabled)</option>
+            </select>
+            {{else if eq .ID "notion"}}
+            <select id="scope_{{.ID}}" name="scope_{{.ID}}" class="form-select connector-scope-select" data-connector-id="{{.ID}}" data-keyless="false" onchange="onScopeChange()">
+              <option value="read_only" {{if eq .ScopeMode "read_only"}}selected{{end}}>read_only</option>
+              <option value="full_access" {{if or (eq .ScopeMode "full_access") (not .ScopeMode)}}selected{{end}}>full_access</option>
+              <option value="none" {{if eq .ScopeMode "none"}}selected{{end}}>none</option>
             </select>
             {{else if or (eq .ID "gcp") (eq .ID "gdk") .KeylessADC}}
             <select id="scope_{{.ID}}" name="scope_{{.ID}}" class="form-select connector-scope-select" data-connector-id="{{.ID}}" data-keyless="true" onchange="onScopeChange()">
@@ -338,6 +350,29 @@
       window.open('/oauth/connect/' + encodeURIComponent(id) + '?mode=' + encodeURIComponent(mode), 'spark_oauth_popup', 'width=620,height=720');
     }
 
+    function extractApiError(data, fallback) {
+      if (!data) return fallback;
+      if (typeof data.error_description === 'string' && data.error_description.trim() !== '') {
+        return data.error_description;
+      }
+      if (typeof data.error === 'string' && data.error.trim() !== '') {
+        return data.error;
+      }
+      if (data.error && typeof data.error === 'object') {
+        if (data.error.data && typeof data.error.data.error_description === 'string' && data.error.data.error_description.trim() !== '') {
+          return data.error.data.error_description;
+        }
+        if (typeof data.error.message === 'string' && data.error.message.trim() !== '') {
+          return data.error.message;
+        }
+        try { return JSON.stringify(data.error); } catch (e) {}
+      }
+      if (typeof data.message === 'string' && data.message.trim() !== '') {
+        return data.message;
+      }
+      return fallback;
+    }
+
     function loadGitHubWorkspacesForAuthorize() {
       var btn = document.getElementById('btn-discover-gh-auth');
       var statusBox = document.getElementById('auth-gh-status');
@@ -350,9 +385,13 @@
         credentials: 'same-origin'
       })
       .then(function(res) {
-        return res.json().then(function(data) {
-          if (!res.ok) throw new Error(data.error_description || data.error || 'Failed to discover GitHub workspaces');
-          return data;
+        return res.text().then(function(text) {
+          var data = null;
+          try { data = text ? JSON.parse(text) : {}; } catch (e) {}
+          if (!res.ok) {
+            throw new Error(extractApiError(data, (text && text.trim()) || ('HTTP ' + res.status + ': Failed to discover GitHub workspaces')));
+          }
+          return data || {};
         });
       })
       .then(function(data) {
@@ -491,9 +530,13 @@
         credentials: 'same-origin'
       })
       .then(function(res) {
-        return res.json().then(function(data) {
-          if (!res.ok) throw new Error(data.error_description || data.error || 'Failed to discover Jira spaces');
-          return data;
+        return res.text().then(function(text) {
+          var data = null;
+          try { data = text ? JSON.parse(text) : {}; } catch (e) {}
+          if (!res.ok) {
+            throw new Error(extractApiError(data, (text && text.trim()) || ('HTTP ' + res.status + ': Failed to discover Jira spaces')));
+          }
+          return data || {};
         });
       })
       .then(function(data) {
