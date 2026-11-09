@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -381,5 +382,203 @@ func TestBrokerJiraCallback(t *testing.T) {
 	}
 	if tok.AccessToken != "jira-access-111" {
 		t.Errorf("expected jira-access-111, got %s", tok.AccessToken)
+	}
+}
+
+type mockRoundTripper func(req *http.Request) (*http.Response, error)
+
+func (m mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return m(req)
+}
+
+func TestBrokerWorkspaceEndpoints(t *testing.T) {
+	b, _, v, sm, _ := newTestBroker(t)
+	adminEmail := "admin@example.com"
+
+	b.GitHubAPIURL = "http://mock.github"
+	b.AtlassianAPIURL = "http://mock.atlassian"
+
+	b.httpClient = &http.Client{
+		Transport: mockRoundTripper(func(r *http.Request) (*http.Response, error) {
+			rec := httptest.NewRecorder()
+			rec.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.URL.Path == "/user/orgs":
+				_ = json.NewEncoder(rec).Encode([]map[string]string{
+					{"login": "aetherise-cloud"},
+				})
+			case r.URL.Path == "/user/repos":
+				_ = json.NewEncoder(rec).Encode([]map[string]string{
+					{"full_name": "aetherise-cloud/spark-mcp-gateway"},
+				})
+			case r.URL.Path == "/orgs/aetherise-cloud/repos":
+				_ = json.NewEncoder(rec).Encode([]map[string]string{
+					{"full_name": "aetherise-cloud/spark-mcp-gateway"},
+				})
+			case strings.HasPrefix(r.URL.Path, "/ex/jira/") && strings.HasSuffix(r.URL.Path, "/rest/api/3/project/search"):
+				_ = json.NewEncoder(rec).Encode(map[string]interface{}{
+					"values": []map[string]string{
+						{"key": "SPARK", "name": "Spark Gateway"},
+						{"key": "ONB", "name": "Onboarding"},
+					},
+				})
+			default:
+				rec.WriteHeader(http.StatusNotFound)
+			}
+			return rec.Result(), nil
+		}),
+	}
+
+	mux := http.NewServeMux()
+	b.RegisterRoutes(mux)
+
+	recSession := httptest.NewRecorder()
+	sm.SetAdminSession(recSession, adminEmail)
+	cookie := recSession.Result().Cookies()[0]
+	csrfToken := sm.GenerateCSRFToken(adminEmail)
+
+	// 1. Unauthenticated check
+	reqUnauth := httptest.NewRequest("GET", "/api/connectors/github/workspaces", nil)
+	recUnauth := httptest.NewRecorder()
+	mux.ServeHTTP(recUnauth, reqUnauth)
+	if recUnauth.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized for unauth workspaces, got %d", recUnauth.Code)
+	}
+
+	// 2. Unconnected check
+	reqUnconn := httptest.NewRequest("GET", "/api/connectors/github/workspaces", nil)
+	reqUnconn.AddCookie(cookie)
+	recUnconn := httptest.NewRecorder()
+	mux.ServeHTTP(recUnconn, reqUnconn)
+	if recUnconn.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unconnected GitHub, got %d: %s", recUnconn.Code, recUnconn.Body.String())
+	}
+
+	// 3. Connect GitHub into vault
+	ghTok := &vault.TokenData{
+		AccessToken:       "mock-gh-pat",
+		AccountLabel:      "octocat",
+		SelectedOrgs:      []string{"aetherise-cloud"},
+		AllowedReadRepos:  []string{"aetherise-cloud/*"},
+		AllowedWriteRepos: "aetherise-cloud/spark-mcp-gateway",
+	}
+	if err := v.StoreToken(context.Background(), adminEmail, "github", ghTok); err != nil {
+		t.Fatalf("failed storing gh token: %v", err)
+	}
+
+	// Test GET /api/connectors/github/workspaces
+	reqGH := httptest.NewRequest("GET", "/api/connectors/github/workspaces", nil)
+	reqGH.AddCookie(cookie)
+	recGH := httptest.NewRecorder()
+	mux.ServeHTTP(recGH, reqGH)
+	if recGH.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from github workspaces, got %d: %s", recGH.Code, recGH.Body.String())
+	}
+
+	var ghResp struct {
+		Orgs              []string `json:"orgs"`
+		Repos             []string `json:"repos"`
+		SelectedOrgs      []string `json:"selected_orgs"`
+		AllowedReadRepos  []string `json:"allowed_read_repos"`
+		AllowedWriteRepos []string `json:"allowed_write_repos"`
+	}
+	if err := json.Unmarshal(recGH.Body.Bytes(), &ghResp); err != nil {
+		t.Fatalf("failed parsing gh workspaces json: %v", err)
+	}
+	if len(ghResp.Orgs) == 0 || ghResp.Orgs[0] != "aetherise-cloud" {
+		t.Errorf("unexpected orgs: %v", ghResp.Orgs)
+	}
+	if len(ghResp.Repos) == 0 || ghResp.Repos[0] != "aetherise-cloud/spark-mcp-gateway" {
+		t.Errorf("unexpected repos: %v", ghResp.Repos)
+	}
+	if len(ghResp.AllowedWriteRepos) == 0 || ghResp.AllowedWriteRepos[0] != "aetherise-cloud/spark-mcp-gateway" {
+		t.Errorf("unexpected allowed write repos: %v", ghResp.AllowedWriteRepos)
+	}
+
+	// 4. Connect Jira into vault
+	jiraTok := &vault.TokenData{
+		AccessToken:      "mock-jira-token",
+		CloudID:          "jira-cloud-123",
+		SiteURL:          "https://aetherise.atlassian.net",
+		SiteName:         "Aetherise",
+		AllowedSpaceKeys: []string{"SPARK"},
+	}
+	if err := v.StoreToken(context.Background(), adminEmail, "jira", jiraTok); err != nil {
+		t.Fatalf("failed storing jira token: %v", err)
+	}
+
+	// Test GET /api/connectors/jira/workspaces
+	reqJira := httptest.NewRequest("GET", "/api/connectors/jira/workspaces", nil)
+	reqJira.AddCookie(cookie)
+	recJira := httptest.NewRecorder()
+	mux.ServeHTTP(recJira, reqJira)
+	if recJira.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from jira workspaces, got %d: %s", recJira.Code, recJira.Body.String())
+	}
+
+	var jiraResp struct {
+		CloudID          string `json:"cloud_id"`
+		SiteURL          string `json:"site_url"`
+		SiteName         string `json:"site_name"`
+		Spaces           []struct{ Key, Name string } `json:"spaces"`
+		AllowedSpaceKeys []string `json:"allowed_space_keys"`
+	}
+	if err := json.Unmarshal(recJira.Body.Bytes(), &jiraResp); err != nil {
+		t.Fatalf("failed parsing jira workspaces json: %v", err)
+	}
+	if jiraResp.CloudID != "jira-cloud-123" || len(jiraResp.Spaces) < 2 {
+		t.Errorf("unexpected jira workspaces response: %+v", jiraResp)
+	}
+
+	// 5. Test POST /api/connectors/workspaces (CSRF failure)
+	saveBadCSRF := `{"provider":"jira","csrf_token":"invalid","allowed_space_keys":["SPARK","ONB"]}`
+	reqBadCSRF := httptest.NewRequest("POST", "/api/connectors/workspaces", strings.NewReader(saveBadCSRF))
+	reqBadCSRF.Header.Set("Content-Type", "application/json")
+	reqBadCSRF.AddCookie(cookie)
+	recBadCSRF := httptest.NewRecorder()
+	mux.ServeHTTP(recBadCSRF, reqBadCSRF)
+	if recBadCSRF.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for bad CSRF, got %d", recBadCSRF.Code)
+	}
+
+	// 6. Test POST /api/connectors/workspaces (valid save for Jira)
+	saveJira := fmt.Sprintf(`{"provider":"jira","csrf_token":%q,"allowed_space_keys":["SPARK","ONB"]}`, csrfToken)
+	reqSaveJira := httptest.NewRequest("POST", "/api/connectors/workspaces", strings.NewReader(saveJira))
+	reqSaveJira.Header.Set("Content-Type", "application/json")
+	reqSaveJira.AddCookie(cookie)
+	recSaveJira := httptest.NewRecorder()
+	mux.ServeHTTP(recSaveJira, reqSaveJira)
+	if recSaveJira.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for save jira workspaces, got %d: %s", recSaveJira.Code, recSaveJira.Body.String())
+	}
+
+	updatedJira, err := v.GetValidAccessToken(context.Background(), adminEmail, "jira")
+	if err != nil {
+		t.Fatalf("failed getting updated jira token: %v", err)
+	}
+	if len(updatedJira.AllowedSpaceKeys) != 2 || updatedJira.AllowedSpaceKeys[1] != "ONB" {
+		t.Errorf("expected allowed space keys [SPARK ONB], got %v", updatedJira.AllowedSpaceKeys)
+	}
+
+	// 7. Test POST /api/connectors/workspaces (valid save for GitHub)
+	saveGH := fmt.Sprintf(`{"provider":"github","csrf_token":%q,"selected_orgs":["aetherise-cloud"],"allowed_read_repos":["aetherise-cloud/*"],"allowed_write_repos":["aetherise-cloud/spark-mcp-gateway"]}`, csrfToken)
+	reqSaveGH := httptest.NewRequest("POST", "/api/connectors/workspaces", strings.NewReader(saveGH))
+	reqSaveGH.Header.Set("Content-Type", "application/json")
+	reqSaveGH.AddCookie(cookie)
+	recSaveGH := httptest.NewRecorder()
+	mux.ServeHTTP(recSaveGH, reqSaveGH)
+	if recSaveGH.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for save github workspaces, got %d: %s", recSaveGH.Code, recSaveGH.Body.String())
+	}
+
+	updatedGH, err := v.GetValidAccessToken(context.Background(), adminEmail, "github")
+	if err != nil {
+		t.Fatalf("failed getting updated github token: %v", err)
+	}
+	if len(updatedGH.SelectedOrgs) != 1 || updatedGH.SelectedOrgs[0] != "aetherise-cloud" {
+		t.Errorf("unexpected selected_orgs: %v", updatedGH.SelectedOrgs)
+	}
+	if updatedGH.AllowedWriteRepos != "aetherise-cloud/spark-mcp-gateway" {
+		t.Errorf("unexpected allowed_write_repos: %s", updatedGH.AllowedWriteRepos)
 	}
 }
