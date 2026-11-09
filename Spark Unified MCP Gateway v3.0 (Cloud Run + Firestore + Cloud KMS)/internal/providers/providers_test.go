@@ -960,3 +960,275 @@ func TestGFlowMCPTools(t *testing.T) {
 		t.Errorf("expected bridge output, got: %s", bridgeOut)
 	}
 }
+
+func TestNotionTools(t *testing.T) {
+	mockClient := &http.Client{
+		Transport: mockTransport(func(req *http.Request) (*http.Response, error) {
+			// Verify required Notion API headers
+			if req.Header.Get("Authorization") != "Bearer test-notion-token" {
+				rec := httptest.NewRecorder()
+				rec.WriteHeader(http.StatusUnauthorized)
+				_, _ = rec.Write([]byte(`{"object":"error","status":401,"message":"API token is invalid."}`))
+				return rec.Result(), nil
+			}
+			if req.Header.Get("Notion-Version") != "2022-06-28" {
+				rec := httptest.NewRecorder()
+				rec.WriteHeader(http.StatusBadRequest)
+				_, _ = rec.Write([]byte(`{"object":"error","status":400,"message":"Invalid Notion-Version header."}`))
+				return rec.Result(), nil
+			}
+
+			rec := httptest.NewRecorder()
+			rec.Header().Set("Content-Type", "application/json")
+			path := req.URL.Path
+
+			switch {
+			case req.Method == "POST" && path == "/v1/search":
+				rec.WriteHeader(http.StatusOK)
+				_, _ = rec.Write([]byte(`{
+					"results": [
+						{
+							"object": "page",
+							"id": "page-1234",
+							"url": "https://notion.so/page-1234",
+							"last_edited_time": "2026-03-01T12:00:00.000Z",
+							"properties": {
+								"title": {
+									"type": "title",
+									"title": [{"plain_text": "Engineering Roadmap"}]
+								}
+							}
+						},
+						{
+							"object": "database",
+							"id": "db-5678",
+							"url": "https://notion.so/db-5678",
+							"last_edited_time": "2026-03-02T12:00:00.000Z",
+							"title": [{"plain_text": "Tasks Database"}]
+						}
+					],
+					"has_more": false
+				}`))
+
+			case req.Method == "GET" && path == "/v1/pages/page-1234":
+				rec.WriteHeader(http.StatusOK)
+				_, _ = rec.Write([]byte(`{
+					"id": "page-1234",
+					"url": "https://notion.so/page-1234",
+					"created_time": "2026-01-01T00:00:00.000Z",
+					"last_edited_time": "2026-03-01T12:00:00.000Z",
+					"archived": false,
+					"properties": {
+						"Name": {
+							"type": "title",
+							"title": [{"plain_text": "Engineering Roadmap"}]
+						},
+						"Status": {
+							"type": "status",
+							"status": {"name": "In Progress"}
+						},
+						"Priority": {
+							"type": "select",
+							"select": {"name": "High"}
+						}
+					}
+				}`))
+
+			case req.Method == "GET" && strings.HasPrefix(path, "/v1/blocks/page-1234/children"):
+				rec.WriteHeader(http.StatusOK)
+				_, _ = rec.Write([]byte(`{
+					"results": [
+						{
+							"type": "heading_1",
+							"heading_1": {
+								"rich_text": [{"plain_text": "Q1 Objectives"}]
+							}
+						},
+						{
+							"type": "paragraph",
+							"paragraph": {
+								"rich_text": [{"plain_text": "Deploy unified gateway to Cloud Run."}]
+							}
+						},
+						{
+							"type": "to_do",
+							"to_do": {
+								"checked": true,
+								"rich_text": [{"plain_text": "Configure KMS encryption"}]
+							}
+						},
+						{
+							"type": "to_do",
+							"to_do": {
+								"checked": false,
+								"rich_text": [{"plain_text": "Connect Notion provider"}]
+							}
+						},
+						{
+							"type": "code",
+							"code": {
+								"language": "go",
+								"rich_text": [{"plain_text": "fmt.Println(\"Notion MCP\")"}]
+							}
+						}
+					],
+					"has_more": false
+				}`))
+
+			case req.Method == "POST" && path == "/v1/databases/db-5678/query":
+				rec.WriteHeader(http.StatusOK)
+				_, _ = rec.Write([]byte(`{
+					"results": [
+						{
+							"id": "row-1",
+							"url": "https://notion.so/row-1",
+							"last_edited_time": "2026-03-02T10:00:00.000Z",
+							"properties": {
+								"Task": {
+									"type": "title",
+									"title": [{"plain_text": "Implement Notion MCP"}]
+								}
+							}
+						}
+					],
+					"has_more": false
+				}`))
+
+			case req.Method == "GET" && path == "/v1/databases/db-5678":
+				rec.WriteHeader(http.StatusOK)
+				_, _ = rec.Write([]byte(`{
+					"id": "db-5678",
+					"url": "https://notion.so/db-5678",
+					"created_time": "2026-01-01T00:00:00.000Z",
+					"last_edited_time": "2026-03-02T12:00:00.000Z",
+					"title": [{"plain_text": "Tasks Database"}],
+					"properties": {
+						"Task": {"type": "title"},
+						"Status": {"type": "status"}
+					}
+				}`))
+
+			case req.Method == "POST" && path == "/v1/pages":
+				rec.WriteHeader(http.StatusOK)
+				_, _ = rec.Write([]byte(`{
+					"id": "new-page-999",
+					"url": "https://notion.so/new-page-999",
+					"created_time": "2026-03-03T10:00:00.000Z"
+				}`))
+
+			case req.Method == "PATCH" && strings.HasPrefix(path, "/v1/blocks/page-1234/children"):
+				rec.WriteHeader(http.StatusOK)
+				_, _ = rec.Write([]byte(`{
+					"results": [
+						{"id": "new-block-1"}
+					]
+				}`))
+
+			default:
+				rec.WriteHeader(http.StatusNotFound)
+				_, _ = rec.Write([]byte(`{"object":"error","status":404,"message":"Not found"}`))
+			}
+
+			return rec.Result(), nil
+		}),
+	}
+
+	reg := NewRegistry(&config.Config{}, mockClient, nil)
+	reg.NotionBaseURL = "http://mock.notion.api"
+
+	tok := &vault.TokenData{
+		AccessToken: "test-notion-token",
+		Scope:       "full_access",
+	}
+	ctx := context.Background()
+
+	// 1. notion_search
+	searchOut, err := reg.Execute(ctx, "notion_search", map[string]interface{}{
+		"query": "Roadmap",
+	}, tok)
+	if err != nil {
+		t.Fatalf("notion_search failed: %v", err)
+	}
+	if !strings.Contains(searchOut, "Engineering Roadmap") || !strings.Contains(searchOut, "Tasks Database") {
+		t.Errorf("unexpected search output: %s", searchOut)
+	}
+
+	// 2. notion_get_page
+	pageOut, err := reg.Execute(ctx, "notion_get_page", map[string]interface{}{
+		"page_id": "page-1234",
+	}, tok)
+	if err != nil {
+		t.Fatalf("notion_get_page failed: %v", err)
+	}
+	if !strings.Contains(pageOut, "Engineering Roadmap") || !strings.Contains(pageOut, "In Progress") {
+		t.Errorf("unexpected get_page output: %s", pageOut)
+	}
+
+	// 3. notion_get_block_children (markdown rendering)
+	blocksOut, err := reg.Execute(ctx, "notion_get_block_children", map[string]interface{}{
+		"block_id": "page-1234",
+	}, tok)
+	if err != nil {
+		t.Fatalf("notion_get_block_children failed: %v", err)
+	}
+	if !strings.Contains(blocksOut, "# Q1 Objectives") ||
+		!strings.Contains(blocksOut, "Deploy unified gateway to Cloud Run.") ||
+		!strings.Contains(blocksOut, "[x] Configure KMS encryption") ||
+		!strings.Contains(blocksOut, "[ ] Connect Notion provider") ||
+		!strings.Contains(blocksOut, "```go") {
+		t.Errorf("unexpected get_block_children markdown output: %s", blocksOut)
+	}
+
+	// 4. notion_query_database
+	queryOut, err := reg.Execute(ctx, "notion_query_database", map[string]interface{}{
+		"database_id": "db-5678",
+	}, tok)
+	if err != nil {
+		t.Fatalf("notion_query_database failed: %v", err)
+	}
+	if !strings.Contains(queryOut, "Implement Notion MCP") {
+		t.Errorf("unexpected query_database output: %s", queryOut)
+	}
+
+	// 5. notion_get_database
+	dbOut, err := reg.Execute(ctx, "notion_get_database", map[string]interface{}{
+		"database_id": "db-5678",
+	}, tok)
+	if err != nil {
+		t.Fatalf("notion_get_database failed: %v", err)
+	}
+	if !strings.Contains(dbOut, "Tasks Database") || !strings.Contains(dbOut, "title") {
+		t.Errorf("unexpected get_database output: %s", dbOut)
+	}
+
+	// 6. notion_create_page
+	createOut, err := reg.Execute(ctx, "notion_create_page", map[string]interface{}{
+		"parent_page_id": "page-1234",
+		"title":          "New Subpage",
+		"content":        "Some content here",
+	}, tok)
+	if err != nil {
+		t.Fatalf("notion_create_page failed: %v", err)
+	}
+	if !strings.Contains(createOut, "new-page-999") {
+		t.Errorf("unexpected create_page output: %s", createOut)
+	}
+
+	// 7. notion_append_block_children
+	appendOut, err := reg.Execute(ctx, "notion_append_block_children", map[string]interface{}{
+		"block_id": "page-1234",
+		"content":  "Appended paragraph",
+	}, tok)
+	if err != nil {
+		t.Fatalf("notion_append_block_children failed: %v", err)
+	}
+	if !strings.Contains(appendOut, "appended") {
+		t.Errorf("unexpected append_block_children output: %s", appendOut)
+	}
+
+	// 8. Missing token check
+	_, err = reg.Execute(ctx, "notion_search", map[string]interface{}{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "token required") {
+		t.Errorf("expected error for missing token, got: %v", err)
+	}
+}
