@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"encoding/json"
@@ -82,8 +83,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 1. Authenticate Bearer JWT
 	claims, err := s.authenticateRequest(r)
 	if err != nil {
-		w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s/.well-known/oauth-protected-resource"`, s.cfg.ServiceURL))
-		http.Error(w, fmt.Sprintf(`{"error":"unauthorized","error_description":%q}`, err.Error()), http.StatusUnauthorized)
+		w.Header().Set("WWW-Authenticate", fmt.Sprintf("Bearer resource_metadata=%q", s.cfg.ServiceURL+"/.well-known/oauth-protected-resource"))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		errDesc := err.Error()
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      nil,
+			"error": map[string]interface{}{
+				"code":    -32001,
+				"message": "Unauthorized: invalid or missing Bearer token",
+				"data": map[string]interface{}{
+					"http_status":       http.StatusUnauthorized,
+					"error":             "unauthorized",
+					"error_description": errDesc,
+				},
+			},
+			"error_description": errDesc,
+		})
 		return
 	}
 
@@ -180,6 +197,13 @@ func (s *Server) handleToolsList(w http.ResponseWriter, r *http.Request, req JSO
 
 		// 2. Check scope restrictions granted by token claims
 		scopeMode := claims.Scopes[t.Provider]
+		if scopeMode == "" && t.Provider == "gflow" {
+			if ghScope, ok := claims.Scopes["github"]; ok && ghScope == "full_access" {
+				scopeMode = "full_access"
+			} else {
+				scopeMode = "read_only"
+			}
+		}
 		if scopeMode == "none" {
 			continue
 		}
@@ -418,6 +442,13 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, r *http.Request, req JSO
 
 	// Scope Gate check
 	scopeMode := claims.Scopes[toolDef.Provider]
+	if scopeMode == "" && toolDef.Provider == "gflow" {
+		if ghScope, ok := claims.Scopes["github"]; ok && ghScope == "full_access" {
+			scopeMode = "full_access"
+		} else {
+			scopeMode = "read_only"
+		}
+	}
 	if scopeMode == "none" {
 		writeToolError(w, req.ID, fmt.Sprintf("Access denied: token has no permission for provider %s", toolDef.Provider))
 		return
@@ -435,13 +466,29 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, r *http.Request, req JSO
 	if toolDef.Provider == "github" || toolDef.Provider == "jira" {
 		tok, err := s.vault.GetValidAccessToken(r.Context(), adminEmail, toolDef.Provider)
 		if err != nil {
-			writeToolError(w, req.ID, fmt.Sprintf("Provider %s is not connected or credentials expired: %v", toolDef.Provider, err))
+			writeToolError(w, req.ID, fmt.Sprintf("Provider %s is not connected or credentials expired (%v). Please re-authorize at %s/oauth/connect/%s or %s/dashboard", toolDef.Provider, err, s.cfg.ServiceURL, toolDef.Provider, s.cfg.ServiceURL))
 			return
 		}
 		tokenData = tok
+	} else if toolDef.Provider == "gflow" {
+		if s.vault != nil {
+			if tok, err := s.vault.GetValidAccessToken(r.Context(), adminEmail, "gflow"); err == nil && tok != nil {
+				tokenData = tok
+			}
+		}
 	}
 
 	rawOutput, err := s.registry.Execute(r.Context(), toolDef.Name, params.Arguments, tokenData)
+	if err != nil {
+		errStr := err.Error()
+		if (strings.Contains(errStr, "HTTP 401") || strings.Contains(strings.ToLower(errStr), "401 unauthorized")) && tokenData != nil && tokenData.RefreshToken != "" {
+			refreshedTok, refErr := s.vault.ForceRefreshToken(r.Context(), adminEmail, toolDef.Provider)
+			if refErr == nil && refreshedTok != nil {
+				tokenData = refreshedTok
+				rawOutput, err = s.registry.Execute(r.Context(), toolDef.Name, params.Arguments, refreshedTok)
+			}
+		}
+	}
 	if err != nil {
 		writeToolError(w, req.ID, fmt.Sprintf("Tool execution error: %v", err))
 		return
@@ -497,4 +544,94 @@ func writeRPCError(w http.ResponseWriter, id interface{}, code int, message stri
 			Message: message,
 		},
 	})
+}
+
+// JSONErrorMiddleware wraps next, recovering from panics and intercepting text/plain
+// 500/503 responses for /mcp or application/json requests to return standard JSON-RPC 2.0 error envelopes.
+func JSONErrorMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		isMCP := r.URL.Path == "/mcp" || strings.HasPrefix(r.URL.Path, "/mcp/") ||
+			strings.Contains(r.Header.Get("Accept"), "application/json")
+
+		defer func() {
+			if rec := recover(); rec != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After", "3")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"id":      nil,
+					"error": map[string]interface{}{
+						"code":    -32003,
+						"message": "Upstream service temporarily unavailable or cold-starting",
+						"data": map[string]interface{}{
+							"http_status":         http.StatusServiceUnavailable,
+							"error_code":          "service_unavailable",
+							"retry_after_seconds": 3,
+						},
+					},
+				})
+			}
+		}()
+
+		if !isMCP {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		rw := &mcpResponseWriter{ResponseWriter: w}
+		next.ServeHTTP(rw, r)
+
+		status := rw.statusCode
+		if status == 0 {
+			status = http.StatusOK
+		}
+
+		if status == http.StatusServiceUnavailable || status == http.StatusInternalServerError {
+			ct := rw.Header().Get("Content-Type")
+			bodyStr := rw.buf.String()
+			isPlainOrColdStart := strings.Contains(ct, "text/plain") || ct == "" ||
+				strings.HasPrefix(strings.TrimSpace(bodyStr), "Service Unavailable") ||
+				!strings.Contains(bodyStr, `"jsonrpc"`)
+
+			if isPlainOrColdStart {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After", "3")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"id":      nil,
+					"error": map[string]interface{}{
+						"code":    -32003,
+						"message": "Upstream service temporarily unavailable or cold-starting",
+						"data": map[string]interface{}{
+							"http_status":         http.StatusServiceUnavailable,
+							"error_code":          "service_unavailable",
+							"retry_after_seconds": 3,
+						},
+					},
+				})
+				return
+			}
+		}
+
+		w.WriteHeader(status)
+		_, _ = w.Write(rw.buf.Bytes())
+	})
+}
+
+type mcpResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+	buf        bytes.Buffer
+}
+
+func (w *mcpResponseWriter) WriteHeader(code int) {
+	if w.statusCode == 0 {
+		w.statusCode = code
+	}
+}
+
+func (w *mcpResponseWriter) Write(b []byte) (int, error) {
+	return w.buf.Write(b)
 }
