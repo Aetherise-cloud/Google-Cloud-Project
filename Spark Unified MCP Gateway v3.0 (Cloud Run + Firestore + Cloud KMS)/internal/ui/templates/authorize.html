@@ -130,19 +130,155 @@
         </div>
 
         <h3 style="margin-bottom: 12px;">Per-Connector Scope Configuration</h3>
-        <div class="scope-pills-grid">
+        <div class="scope-pills-grid" id="custom-scope-wrapper">
           {{range .Connectors}}
           <div class="scope-pill-item">
             <span class="scope-pill-label">{{.Name}}</span>
-            <select id="scope_{{.ID}}" name="scope_{{.ID}}" class="form-select connector-scope-select" data-connector-id="{{.ID}}" data-keyless="{{.KeylessADC}}" onchange="onScopeChange()">
+            {{if eq .ID "gflow"}}
+            <select id="scope_{{.ID}}" name="scope_{{.ID}}" class="form-select connector-scope-select" data-connector-id="{{.ID}}" data-keyless="false" onchange="onScopeChange()">
+              <option value="full_access" selected>Full Access (AI Image &amp; Video Generation + Catalog)</option>
+              <option value="read_only">Read Only (Models, Projects, Characters &amp; Credits Only)</option>
+              <option value="none">None (Disabled)</option>
+            </select>
+            {{else if or (eq .ID "gcp") (eq .ID "gdk") .KeylessADC}}
+            <select id="scope_{{.ID}}" name="scope_{{.ID}}" class="form-select connector-scope-select" data-connector-id="{{.ID}}" data-keyless="true" onchange="onScopeChange()">
+              <option value="read_only" selected>Read Only (Keyless ADC)</option>
+              <option value="none">None (Disabled)</option>
+            </select>
+            {{else}}
+            <select id="scope_{{.ID}}" name="scope_{{.ID}}" class="form-select connector-scope-select" data-connector-id="{{.ID}}" data-keyless="false" onchange="onScopeChange()">
               <option value="read_only">read_only</option>
-              {{if not .KeylessADC}}
               <option value="full_access">full_access</option>
-              {{end}}
               <option value="none">none</option>
             </select>
+            {{end}}
           </div>
           {{end}}
+        </div>
+
+        <!-- Interactive Workspace & Scope Picker (GitHub Orgs/Repos & Jira Spaces) -->
+        <div class="workspace-section">
+          <h3 style="margin-bottom: 8px;">Workspace &amp; Resource Scope Permissions</h3>
+          <p class="text-muted" style="margin-bottom: 16px; font-size: 0.85rem;">Optionally constrain which repositories and project spaces this client is allowed to access.</p>
+
+          <div style="display: flex; flex-direction: column; gap: 16px;">
+            <!-- GitHub Workspace Scope Card -->
+            <div class="workspace-card" id="workspace-picker-github">
+              <div class="workspace-card-header">
+                <div>
+                  <h4 style="font-size: 0.95rem; font-weight: 600;">GitHub Workspace &amp; Repositories</h4>
+                  <span class="text-muted" style="font-size: 0.8rem;">Select target organizations and allowed read/write repository boundaries</span>
+                </div>
+                <button type="button" class="btn btn-sm btn-outline" id="btn-discover-gh-auth" onclick="loadGitHubWorkspacesForAuthorize()">Discover GitHub Orgs &amp; Repos</button>
+              </div>
+
+              <div id="auth-gh-status" style="display: none; margin-bottom: 10px;" class="alert"></div>
+
+              <!-- Pre-rendered from template data if available -->
+              {{range .Connectors}}
+                {{if eq .ID "github"}}
+                  {{if .SelectedOrgs}}
+                  <div class="workspace-group">
+                    <div class="workspace-group-title">Target Organizations:</div>
+                    <div class="checkbox-list">
+                      {{range .SelectedOrgs}}
+                      <label class="checkbox-item">
+                        <input type="checkbox" name="selected_orgs" value="{{.}}" checked>
+                        <span>{{.}}</span>
+                      </label>
+                      {{end}}
+                    </div>
+                  </div>
+                  {{end}}
+
+                  {{if .AllowedReadRepos}}
+                  <div class="workspace-group">
+                    <div class="workspace-group-title">Allowed Read Repositories:</div>
+                    <div class="checkbox-list">
+                      {{range .AllowedReadRepos}}
+                      <label class="checkbox-item">
+                        <input type="checkbox" name="allowed_read_repos" value="{{.}}" checked>
+                        <span>{{.}}</span>
+                      </label>
+                      {{end}}
+                    </div>
+                  </div>
+                  {{end}}
+
+                  {{if .AllowedWriteRepos}}
+                  <div class="workspace-group">
+                    <div class="workspace-group-title">Allowed Write Repositories:</div>
+                    <div class="checkbox-list">
+                      {{range .AllowedWriteRepos}}
+                      <label class="checkbox-item">
+                        <input type="checkbox" name="allowed_write_repos" value="{{.}}" checked>
+                        <span>{{.}}</span>
+                      </label>
+                      {{end}}
+                    </div>
+                  </div>
+                  {{end}}
+                {{end}}
+              {{end}}
+
+              <!-- Dynamically discovered items container -->
+              <div id="auth-gh-discovered-section" style="display: none;"></div>
+
+              <!-- Fallback text inputs -->
+              <div style="margin-top: 12px; display: flex; flex-direction: column; gap: 6px;">
+                <label for="auth-gh-write-repos" style="font-size: 0.8rem; color: var(--text-muted);">Allowed Write Repositories (manual comma-separated fallback, e.g. org/repo or org/*):</label>
+                <input type="text" id="auth-gh-write-repos" name="allowed_write_repos" class="form-input" placeholder="e.g. aetherise-cloud/spark-mcp-gateway, aetherise-cloud/*">
+              </div>
+            </div>
+
+            <!-- Jira Space (Project Key) Scope Card -->
+            <div class="workspace-card" id="workspace-picker-jira">
+              <div class="workspace-card-header">
+                <div>
+                  <h4 style="font-size: 0.95rem; font-weight: 600;">Jira Spaces (Project Keys)</h4>
+                  <span class="text-muted" style="font-size: 0.8rem;">Restrict client access to specific Jira project spaces</span>
+                </div>
+                <button type="button" class="btn btn-sm btn-outline" id="btn-discover-jira-auth" onclick="loadJiraWorkspacesForAuthorize()">Discover Jira Spaces</button>
+              </div>
+
+              <div id="auth-jira-status" style="display: none; margin-bottom: 10px;" class="alert"></div>
+
+              <!-- Pre-rendered from template data if available -->
+              {{range .Connectors}}
+                {{if eq .ID "jira"}}
+                  {{if .SiteName}}
+                  <div style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 8px;">
+                    Bound Jira Site: <span class="workspace-tag">{{.SiteName}}</span>
+                    {{if .CloudID}}<span class="text-muted" style="margin-left: 6px;">({{.CloudID}})</span>{{end}}
+                  </div>
+                  {{end}}
+
+                  {{if .AllowedSpaceKeys}}
+                  <div class="workspace-group">
+                    <div class="workspace-group-title">Target Jira Spaces / Project Keys:</div>
+                    <div class="checkbox-list">
+                      {{range .AllowedSpaceKeys}}
+                      <label class="checkbox-item">
+                        <input type="checkbox" name="allowed_space_keys" value="{{.}}" checked>
+                        <span>{{.}}</span>
+                      </label>
+                      {{end}}
+                    </div>
+                  </div>
+                  {{end}}
+                {{end}}
+              {{end}}
+
+              <!-- Dynamically discovered items container -->
+              <div id="auth-jira-discovered-section" style="display: none;"></div>
+
+              <!-- Fallback text inputs -->
+              <div style="margin-top: 12px; display: flex; flex-direction: column; gap: 6px;">
+                <label for="auth-jira-space-keys" style="font-size: 0.8rem; color: var(--text-muted);">Allowed Jira Space Keys (manual comma-separated fallback, e.g. SPARK, ONB):</label>
+                <input type="text" id="auth-jira-space-keys" name="allowed_space_keys" class="form-input" placeholder="e.g. SPARK, ONB">
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="consent-actions">
@@ -162,7 +298,9 @@
         var id = sel.getAttribute('data-connector-id');
 
         if (preset === 'minimal') {
-          if (isKeyless || id === 'gcp' || id === 'gdk') {
+          if (id === 'gflow') {
+            sel.value = 'none';
+          } else if (isKeyless || id === 'gcp' || id === 'gdk') {
             sel.value = 'read_only';
           } else {
             sel.value = 'none';
@@ -170,7 +308,9 @@
         } else if (preset === 'read_only') {
           sel.value = 'read_only';
         } else if (preset === 'full_access') {
-          if (isKeyless) {
+          if (id === 'gflow') {
+            sel.value = 'full_access';
+          } else if (isKeyless) {
             sel.value = 'read_only';
           } else {
             sel.value = 'full_access';
@@ -196,6 +336,236 @@
       var sel = document.getElementById('scope_' + id);
       var mode = (sel && sel.value !== 'none') ? sel.value : 'read_only';
       window.open('/oauth/connect/' + encodeURIComponent(id) + '?mode=' + encodeURIComponent(mode), 'spark_oauth_popup', 'width=620,height=720');
+    }
+
+    function loadGitHubWorkspacesForAuthorize() {
+      var btn = document.getElementById('btn-discover-gh-auth');
+      var statusBox = document.getElementById('auth-gh-status');
+      var discoveredSec = document.getElementById('auth-gh-discovered-section');
+      if (btn) btn.disabled = true;
+      if (statusBox) statusBox.style.display = 'none';
+
+      fetch('/api/connectors/github/workspaces', {
+        method: 'GET',
+        credentials: 'same-origin'
+      })
+      .then(function(res) {
+        return res.json().then(function(data) {
+          if (!res.ok) throw new Error(data.error_description || data.error || 'Failed to discover GitHub workspaces');
+          return data;
+        });
+      })
+      .then(function(data) {
+        if (!discoveredSec) return;
+        while (discoveredSec.firstChild) {
+          discoveredSec.removeChild(discoveredSec.firstChild);
+        }
+        discoveredSec.style.display = 'block';
+
+        var orgs = data.organizations || data.orgs || [];
+        var repos = data.repositories || data.repos || [];
+
+        // Organizations
+        if (orgs.length > 0) {
+          var orgGroup = document.createElement('div');
+          orgGroup.className = 'workspace-group';
+          var orgTitle = document.createElement('div');
+          orgTitle.className = 'workspace-group-title';
+          orgTitle.textContent = 'Discovered Organizations:';
+          orgGroup.appendChild(orgTitle);
+
+          var orgList = document.createElement('div');
+          orgList.className = 'checkbox-list';
+          for (var i = 0; i < orgs.length; i++) {
+            var orgName = typeof orgs[i] === 'string' ? orgs[i] : (orgs[i].login || orgs[i].name);
+            var lbl = document.createElement('label');
+            lbl.className = 'checkbox-item';
+            var cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.name = 'selected_orgs';
+            cb.value = orgName;
+            cb.checked = true;
+            var sp = document.createElement('span');
+            sp.textContent = orgName;
+            lbl.appendChild(cb);
+            lbl.appendChild(sp);
+            orgList.appendChild(lbl);
+          }
+          orgGroup.appendChild(orgList);
+          discoveredSec.appendChild(orgGroup);
+        }
+
+        // Read Repositories
+        var readGroup = document.createElement('div');
+        readGroup.className = 'workspace-group';
+        var readTitle = document.createElement('div');
+        readTitle.className = 'workspace-group-title';
+        readTitle.textContent = 'Discovered Read Repositories (includes org/* wildcards):';
+        readGroup.appendChild(readTitle);
+
+        var readList = document.createElement('div');
+        readList.className = 'checkbox-list';
+
+        for (var o = 0; o < orgs.length; o++) {
+          var oName = typeof orgs[o] === 'string' ? orgs[o] : (orgs[o].login || orgs[o].name);
+          var wildLbl = document.createElement('label');
+          wildLbl.className = 'checkbox-item';
+          var wildCb = document.createElement('input');
+          wildCb.type = 'checkbox';
+          wildCb.name = 'allowed_read_repos';
+          wildCb.value = oName + '/*';
+          var wildSp = document.createElement('span');
+          wildSp.textContent = oName + '/* (All Repos)';
+          wildLbl.appendChild(wildCb);
+          wildLbl.appendChild(wildSp);
+          readList.appendChild(wildLbl);
+        }
+
+        for (var r = 0; r < repos.length; r++) {
+          var repoFullName = typeof repos[r] === 'string' ? repos[r] : (repos[r].full_name || repos[r].name);
+          var rLbl = document.createElement('label');
+          rLbl.className = 'checkbox-item';
+          var rCb = document.createElement('input');
+          rCb.type = 'checkbox';
+          rCb.name = 'allowed_read_repos';
+          rCb.value = repoFullName;
+          var rSp = document.createElement('span');
+          rSp.textContent = repoFullName;
+          rLbl.appendChild(rCb);
+          rLbl.appendChild(rSp);
+          readList.appendChild(rLbl);
+        }
+        readGroup.appendChild(readList);
+        discoveredSec.appendChild(readGroup);
+
+        // Write Repositories
+        if (repos.length > 0) {
+          var writeGroup = document.createElement('div');
+          writeGroup.className = 'workspace-group';
+          var writeTitle = document.createElement('div');
+          writeTitle.className = 'workspace-group-title';
+          writeTitle.textContent = 'Allowed Write Repositories:';
+          writeGroup.appendChild(writeTitle);
+
+          var writeList = document.createElement('div');
+          writeList.className = 'checkbox-list';
+          for (var w = 0; w < repos.length; w++) {
+            var wFullName = typeof repos[w] === 'string' ? repos[w] : (repos[w].full_name || repos[w].name);
+            var wLbl = document.createElement('label');
+            wLbl.className = 'checkbox-item';
+            var wCb = document.createElement('input');
+            wCb.type = 'checkbox';
+            wCb.name = 'allowed_write_repos';
+            wCb.value = wFullName;
+            var wSp = document.createElement('span');
+            wSp.textContent = wFullName;
+            wLbl.appendChild(wCb);
+            wLbl.appendChild(wSp);
+            writeList.appendChild(wLbl);
+          }
+          writeGroup.appendChild(writeList);
+          discoveredSec.appendChild(writeGroup);
+        }
+      })
+      .catch(function(err) {
+        if (statusBox) {
+          statusBox.className = 'alert alert-error';
+          statusBox.textContent = err.message || 'Failed to discover GitHub workspaces';
+          statusBox.style.display = 'flex';
+        }
+      })
+      .finally(function() {
+        if (btn) btn.disabled = false;
+      });
+    }
+
+    function loadJiraWorkspacesForAuthorize() {
+      var btn = document.getElementById('btn-discover-jira-auth');
+      var statusBox = document.getElementById('auth-jira-status');
+      var discoveredSec = document.getElementById('auth-jira-discovered-section');
+      if (btn) btn.disabled = true;
+      if (statusBox) statusBox.style.display = 'none';
+
+      fetch('/api/connectors/jira/workspaces', {
+        method: 'GET',
+        credentials: 'same-origin'
+      })
+      .then(function(res) {
+        return res.json().then(function(data) {
+          if (!res.ok) throw new Error(data.error_description || data.error || 'Failed to discover Jira spaces');
+          return data;
+        });
+      })
+      .then(function(data) {
+        if (!discoveredSec) return;
+        while (discoveredSec.firstChild) {
+          discoveredSec.removeChild(discoveredSec.firstChild);
+        }
+        discoveredSec.style.display = 'block';
+
+        if (data.site_name) {
+          var siteInfo = document.createElement('div');
+          siteInfo.style.fontSize = '0.85rem';
+          siteInfo.style.color = 'var(--text-secondary)';
+          siteInfo.style.marginBottom = '8px';
+          var siteLbl = document.createElement('span');
+          siteLbl.textContent = 'Bound Site: ';
+          var siteTag = document.createElement('span');
+          siteTag.className = 'workspace-tag';
+          siteTag.textContent = data.site_name;
+          siteInfo.appendChild(siteLbl);
+          siteInfo.appendChild(siteTag);
+          if (data.cloud_id) {
+            var cloudSp = document.createElement('span');
+            cloudSp.className = 'text-muted';
+            cloudSp.style.marginLeft = '6px';
+            cloudSp.textContent = '(' + data.cloud_id + ')';
+            siteInfo.appendChild(cloudSp);
+          }
+          discoveredSec.appendChild(siteInfo);
+        }
+
+        var spaces = data.spaces || data.projects || data.space_keys || [];
+        if (spaces.length > 0) {
+          var spaceGroup = document.createElement('div');
+          spaceGroup.className = 'workspace-group';
+          var spaceTitle = document.createElement('div');
+          spaceTitle.className = 'workspace-group-title';
+          spaceTitle.textContent = 'Discovered Jira Project Spaces:';
+          spaceGroup.appendChild(spaceTitle);
+
+          var spaceList = document.createElement('div');
+          spaceList.className = 'checkbox-list';
+          for (var s = 0; s < spaces.length; s++) {
+            var spKey = typeof spaces[s] === 'string' ? spaces[s] : (spaces[s].key || spaces[s].id);
+            var spName = typeof spaces[s] === 'string' ? spaces[s] : (spaces[s].name ? spaces[s].key + ' - ' + spaces[s].name : spaces[s].key);
+            var sLbl = document.createElement('label');
+            sLbl.className = 'checkbox-item';
+            var sCb = document.createElement('input');
+            sCb.type = 'checkbox';
+            sCb.name = 'allowed_space_keys';
+            sCb.value = spKey;
+            sCb.checked = true;
+            var sSp = document.createElement('span');
+            sSp.textContent = spName;
+            sLbl.appendChild(sCb);
+            sLbl.appendChild(sSp);
+            spaceList.appendChild(sLbl);
+          }
+          spaceGroup.appendChild(spaceList);
+          discoveredSec.appendChild(spaceGroup);
+        }
+      })
+      .catch(function(err) {
+        if (statusBox) {
+          statusBox.className = 'alert alert-error';
+          statusBox.textContent = err.message || 'Failed to discover Jira spaces';
+          statusBox.style.display = 'flex';
+        }
+      })
+      .finally(function() {
+        if (btn) btn.disabled = false;
+      });
     }
 
     window.addEventListener('message', function(event) {

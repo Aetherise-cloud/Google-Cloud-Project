@@ -69,6 +69,7 @@ func main() {
 	tokenVault := vault.NewTokenVault("", st, kms, cfg.KMSKeyName, refreshFunc)
 	toolRegistry := providers.NewRegistry(cfg, nil, nil)
 	authServer := auth.NewOAuthServer(cfg, st, nil)
+	authServer.SetTokenVault(tokenVault)
 	broker = oauthbroker.NewBroker(cfg, st, tokenVault, authServer.SessionManager(), nil)
 	mcpServer := mcp.NewServer(cfg, toolRegistry, tokenVault, st)
 
@@ -92,8 +93,8 @@ func main() {
 	// Wire MCP Streamable HTTP endpoint
 	mux.Handle("/mcp", mcpServer)
 
-	// Security headers and logging middleware
-	handler := securityHeadersMiddleware(logger.HTTPMiddleware(mux))
+	// Security headers and logging middleware with anti-503 JSON-RPC error protection
+	handler := securityHeadersMiddleware(logger.HTTPMiddleware(mcp.JSONErrorMiddleware(mux)))
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -190,14 +191,19 @@ func refreshJiraToken(ctx context.Context, cfg *config.Config, broker *oauthbrok
 	}
 
 	return &vault.TokenData{
-		AccessToken:   res.AccessToken,
-		RefreshToken:  res.RefreshToken,
-		ConnectorType: "oauth2",
-		ExpiresAt:     time.Now().Add(time.Duration(res.ExpiresIn) * time.Second),
-		Scope:         cur.Scope,
-		CloudID:       cur.CloudID,
-		SiteURL:       cur.SiteURL,
-		AccountLabel:  cur.AccountLabel,
-		UpdatedAt:     time.Now(),
+		AccessToken:       res.AccessToken,
+		RefreshToken:      res.RefreshToken,
+		ConnectorType:     "oauth2",
+		ExpiresAt:         time.Now().Add(time.Duration(res.ExpiresIn) * time.Second),
+		Scope:             cur.Scope,
+		CloudID:           cur.CloudID,
+		SiteURL:           cur.SiteURL,
+		SiteName:          cur.SiteName,
+		AccountLabel:      cur.AccountLabel,
+		SelectedOrgs:      cur.SelectedOrgs,
+		AllowedReadRepos:  cur.AllowedReadRepos,
+		AllowedWriteRepos: cur.AllowedWriteRepos,
+		AllowedSpaceKeys:  cur.AllowedSpaceKeys,
+		UpdatedAt:         time.Now(),
 	}, nil
 }

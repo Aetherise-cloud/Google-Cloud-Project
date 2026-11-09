@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -371,5 +372,177 @@ func TestMCPToolsCallSpotlightAndBreakoutEscaping(t *testing.T) {
 	}
 	if !strings.Contains(text, "[REDACTED_TAG_ATTEMPT]") {
 		t.Errorf("expected internal breakout tags to be neutralized, got:\n%s", text)
+	}
+}
+
+func TestFlow3Anti503AndToolErrorAndAutoRefresh(t *testing.T) {
+	server, cfg, _, v, reg := newTestMCPServer(t)
+
+	// 1. Test 401 Discovery Challenge schema (Section C.1.3)
+	reqNoAuth := httptest.NewRequest("POST", "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+	recNoAuth := httptest.NewRecorder()
+	server.ServeHTTP(recNoAuth, reqNoAuth)
+
+	if recNoAuth.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized, got %d", recNoAuth.Code)
+	}
+
+	var authErrRes struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      interface{} `json:"id"`
+		Error   struct {
+			Code    int `json:"code"`
+			Message string `json:"message"`
+			Data    struct {
+				HTTPStatus       int    `json:"http_status"`
+				Error            string `json:"error"`
+				ErrorDescription string `json:"error_description"`
+			} `json:"data"`
+		} `json:"error"`
+		ErrorDescription string `json:"error_description"`
+	}
+	if err := json.Unmarshal(recNoAuth.Body.Bytes(), &authErrRes); err != nil {
+		t.Fatalf("failed unmarshaling 401 JSON error: %v (body: %s)", err, recNoAuth.Body.String())
+	}
+	if authErrRes.JSONRPC != "2.0" || authErrRes.Error.Code != -32001 || authErrRes.Error.Data.HTTPStatus != 401 {
+		t.Errorf("unexpected 401 discovery challenge response: %+v", authErrRes)
+	}
+
+	// 2. Test Graceful Unconfigured Tool Handling (Section C.3.5)
+	validToken := issueTestJWT(t, cfg, map[string]string{"github": "read_only"}, "")
+	callUnconf := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"github_list_prs","arguments":{"owner":"octo","repo":"hello"}}}`
+	reqUnconf := httptest.NewRequest("POST", "/mcp", strings.NewReader(callUnconf))
+	reqUnconf.Header.Set("Authorization", "Bearer "+validToken)
+	recUnconf := httptest.NewRecorder()
+	server.ServeHTTP(recUnconf, reqUnconf)
+
+	if recUnconf.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200 OK for unconfigured tool error, got %d", recUnconf.Code)
+	}
+	var unconfRes struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+			IsError bool `json:"isError"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(recUnconf.Body.Bytes(), &unconfRes); err != nil {
+		t.Fatalf("failed decoding unconfigured tool result: %v", err)
+	}
+	if !unconfRes.Result.IsError || len(unconfRes.Result.Content) == 0 {
+		t.Fatal("expected isError=true for unconfigured tool")
+	}
+	unconfText := unconfRes.Result.Content[0].Text
+	if !strings.Contains(unconfText, "Provider github is not connected") || !strings.Contains(unconfText, "/oauth/connect/github") {
+		t.Errorf("expected re-authorization link in tool error text, got: %s", unconfText)
+	}
+
+	// 3. Test Upstream Token Auto-Refresh on 401 (Section C.3.3)
+	adminEmail := "admin@example.com"
+	initialJiraTok := &vault.TokenData{
+		AccessToken:  "initial-expired-jira-token",
+		RefreshToken: "valid-jira-refresh-token",
+		CloudID:      "jira-cloud-abc",
+	}
+	_ = v.StoreToken(context.Background(), adminEmail, "jira", initialJiraTok)
+
+	var refreshInvoked bool
+	refreshedJiraTok := &vault.TokenData{
+		AccessToken:  "refreshed-valid-jira-token",
+		RefreshToken: "valid-jira-refresh-token-v2",
+		CloudID:      "jira-cloud-abc",
+	}
+	// We can hook a RefreshTokenFunc onto vault or register a test tool that fails 401 on initial token and succeeds on refreshed token
+	var executeCount int
+	reg.RegisterTool(providers.ToolDefinition{
+		Name:          "jira_mock_auto_refresh",
+		Description:   "Tests auto refresh on 401",
+		Provider:      "jira",
+		RequiredScope: "read_only",
+		InputSchema:   map[string]interface{}{"type": "object"},
+	}, func(ctx context.Context, args map[string]interface{}, tok *vault.TokenData) (string, error) {
+		executeCount++
+		if tok.AccessToken == "initial-expired-jira-token" {
+			return "", fmt.Errorf("upstream API returned HTTP 401 Unauthorized")
+		}
+		if tok.AccessToken == "refreshed-valid-jira-token" {
+			return "SUCCESS_AFTER_REFRESH", nil
+		}
+		return "", fmt.Errorf("unknown token: %s", tok.AccessToken)
+	})
+
+	// Setup custom RefreshTokenFunc
+	kmsRefresh, _ := vault.NewLocalAEADKMS([]byte("01234567890123456789012345678901"))
+	vWithRefresh := vault.NewTokenVault("mcp-test-refresh", server.store, kmsRefresh, "test-kek", func(ctx context.Context, provider string, current *vault.TokenData) (*vault.TokenData, error) {
+		refreshInvoked = true
+		return refreshedJiraTok, nil
+	})
+	_ = vWithRefresh.StoreToken(context.Background(), adminEmail, "jira", initialJiraTok)
+	server.vault = vWithRefresh
+
+	jiraToken := issueTestJWT(t, cfg, map[string]string{"jira": "read_only"}, "")
+	callRefresh := `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"jira_mock_auto_refresh","arguments":{}}}`
+	reqRefresh := httptest.NewRequest("POST", "/mcp", strings.NewReader(callRefresh))
+	reqRefresh.Header.Set("Authorization", "Bearer "+jiraToken)
+	recRefresh := httptest.NewRecorder()
+	server.ServeHTTP(recRefresh, reqRefresh)
+
+	if !refreshInvoked {
+		t.Error("expected ForceRefreshToken to be invoked on HTTP 401")
+	}
+	if executeCount != 2 {
+		t.Errorf("expected 2 execution attempts (initial + retry), got %d", executeCount)
+	}
+	if !strings.Contains(recRefresh.Body.String(), "SUCCESS_AFTER_REFRESH") {
+		t.Errorf("expected SUCCESS_AFTER_REFRESH in response, got: %s", recRefresh.Body.String())
+	}
+
+	// 4. Test JSONErrorMiddleware: Panic recovery
+	panicHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("unexpected crash during processing")
+	})
+	protectedPanic := JSONErrorMiddleware(panicHandler)
+	reqPanic := httptest.NewRequest("POST", "/mcp", strings.NewReader(`{}`))
+	recPanic := httptest.NewRecorder()
+	protectedPanic.ServeHTTP(recPanic, reqPanic)
+
+	if recPanic.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 for panic recovery, got %d", recPanic.Code)
+	}
+	var panicRes struct {
+		JSONRPC string `json:"jsonrpc"`
+		Error   struct {
+			Code    int `json:"code"`
+			Message string `json:"message"`
+			Data    struct {
+				HTTPStatus int `json:"http_status"`
+			} `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(recPanic.Body.Bytes(), &panicRes); err != nil {
+		t.Fatalf("failed decoding panic JSON error envelope: %v", err)
+	}
+	if panicRes.Error.Code != -32003 || panicRes.Error.Data.HTTPStatus != 503 {
+		t.Errorf("unexpected panic JSON-RPC envelope: %+v", panicRes)
+	}
+
+	// 5. Test JSONErrorMiddleware: text/plain 503 rewritten to JSON-RPC 2.0
+	plain503Handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+	})
+	protected503 := JSONErrorMiddleware(plain503Handler)
+	req503 := httptest.NewRequest("POST", "/mcp", strings.NewReader(`{}`))
+	rec503 := httptest.NewRecorder()
+	protected503.ServeHTTP(rec503, req503)
+
+	if rec503.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rec503.Code)
+	}
+	if !strings.Contains(rec503.Header().Get("Content-Type"), "application/json") {
+		t.Errorf("expected application/json Content-Type, got %s", rec503.Header().Get("Content-Type"))
+	}
+	if strings.HasPrefix(strings.TrimSpace(rec503.Body.String()), "Service") {
+		t.Error("expected text/plain body to be rewritten into JSON-RPC envelope")
 	}
 }

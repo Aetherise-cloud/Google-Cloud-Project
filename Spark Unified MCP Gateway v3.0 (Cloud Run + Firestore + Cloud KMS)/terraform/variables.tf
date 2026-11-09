@@ -120,3 +120,9 @@ variable "create_wif_pool" {
   type        = bool
   default     = false
 }
+
+variable "enforce_deployer_main_ref_binding" {
+  description = "Enforce Workload Identity Federation principalSet binding strictly to refs/heads/main on the existing gh-deployer service account"
+  type        = bool
+  default     = false
+}

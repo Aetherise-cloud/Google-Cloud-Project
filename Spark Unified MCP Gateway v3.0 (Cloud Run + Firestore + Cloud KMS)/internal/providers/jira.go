@@ -54,6 +54,57 @@ func (r *Registry) registerJiraTools() {
 			"required": []string{"issue_key", "status"},
 		},
 	}, r.handleJiraUpdateIssueStatus)
+
+	// 6. jira_create_issue
+	r.RegisterTool(ToolDefinition{
+		Name:          "jira_create_issue",
+		Description:   "Create a new Jira issue with ADF formatted description.",
+		Provider:      "jira",
+		RequiredScope: "full_access",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"project_key": map[string]interface{}{
+					"type":        "string",
+					"description": "Jira project key (e.g. SPARK)",
+				},
+				"summary": map[string]interface{}{
+					"type":        "string",
+					"description": "Summary or title of the issue",
+				},
+				"description": map[string]interface{}{
+					"type":        "string",
+					"description": "Plaintext description of the issue",
+				},
+				"issue_type": map[string]interface{}{
+					"type":        "string",
+					"description": "Issue type (e.g. 'Task', 'Bug', 'Story', default: 'Task')",
+				},
+			},
+			"required": []string{"project_key", "summary"},
+		},
+	}, r.handleJiraCreateIssue)
+
+	// 7. jira_search_issues
+	r.RegisterTool(ToolDefinition{
+		Name:          "jira_search_issues",
+		Description:   "Search Jira issues using JQL or project key, scoped by allowed workspace projects.",
+		Provider:      "jira",
+		RequiredScope: "read_only",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"jql": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional JQL search query (e.g. status = 'In Progress')",
+				},
+				"project_key": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional project key to filter by (e.g. SPARK)",
+				},
+			},
+		},
+	}, r.handleJiraSearchIssues)
 }
 
 func (r *Registry) handleJiraGetIssue(ctx context.Context, args map[string]interface{}, token *vault.TokenData) (string, error) {
@@ -67,6 +118,14 @@ func (r *Registry) handleJiraGetIssue(ctx context.Context, args map[string]inter
 	issueKey := getStringArg(args, "issue_key", "")
 	if issueKey == "" {
 		return "", errors.New("missing required argument: issue_key")
+	}
+
+	if !isJiraSpaceAllowed(token, issueKey) {
+		projKey := issueKey
+		if idx := strings.Index(projKey, "-"); idx > 0 {
+			projKey = projKey[:idx]
+		}
+		return "", fmt.Errorf("jira space %q is not in allowed_space_keys %v", projKey, token.AllowedSpaceKeys)
 	}
 
 	endpoint := fmt.Sprintf("%s/ex/jira/%s/rest/api/3/issue/%s", r.JiraBaseURL, token.CloudID, url.PathEscape(issueKey))
@@ -145,6 +204,14 @@ func (r *Registry) handleJiraUpdateIssueStatus(ctx context.Context, args map[str
 	targetStatus := getStringArg(args, "status", "")
 	if issueKey == "" || targetStatus == "" {
 		return "", errors.New("missing required arguments: issue_key and status")
+	}
+
+	if !isJiraSpaceAllowed(token, issueKey) {
+		projKey := issueKey
+		if idx := strings.Index(projKey, "-"); idx > 0 {
+			projKey = projKey[:idx]
+		}
+		return "", fmt.Errorf("jira space %q is not in allowed_space_keys %v", projKey, token.AllowedSpaceKeys)
 	}
 
 	// 1. Fetch available transitions
@@ -290,4 +357,222 @@ func traverseChildren(node map[string]interface{}, sb *strings.Builder) {
 			traverseADFNode(childMap, sb)
 		}
 	}
+}
+
+func isJiraSpaceAllowed(token *vault.TokenData, projectOrIssueKey string) bool {
+	if token == nil || len(token.AllowedSpaceKeys) == 0 {
+		return true
+	}
+	projKey := strings.TrimSpace(projectOrIssueKey)
+	if idx := strings.Index(projKey, "-"); idx > 0 {
+		projKey = projKey[:idx]
+	}
+	projKeyLower := strings.ToLower(projKey)
+	for _, allowed := range token.AllowedSpaceKeys {
+		if strings.ToLower(strings.TrimSpace(allowed)) == projKeyLower {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Registry) handleJiraCreateIssue(ctx context.Context, args map[string]interface{}, token *vault.TokenData) (string, error) {
+	if token == nil || token.AccessToken == "" {
+		return "", errors.New("jira connection required: please connect Jira Cloud on gateway dashboard")
+	}
+	if token.CloudID == "" {
+		return "", errors.New("jira cloudId missing from connection: please reconnect Jira")
+	}
+
+	projectKey := getStringArg(args, "project_key", "")
+	summary := getStringArg(args, "summary", "")
+	description := getStringArg(args, "description", "")
+	issueType := getStringArg(args, "issue_type", "Task")
+
+	if projectKey == "" || summary == "" {
+		return "", errors.New("missing required arguments: project_key and summary")
+	}
+
+	if !isJiraSpaceAllowed(token, projectKey) {
+		return "", fmt.Errorf("jira space %q is not in allowed_space_keys %v", projectKey, token.AllowedSpaceKeys)
+	}
+
+	descText := description
+	if strings.TrimSpace(descText) == "" {
+		descText = summary
+	}
+
+	adfDesc := map[string]interface{}{
+		"type":    "doc",
+		"version": 1,
+		"content": []interface{}{
+			map[string]interface{}{
+				"type": "paragraph",
+				"content": []interface{}{
+					map[string]interface{}{
+						"type": "text",
+						"text": descText,
+					},
+				},
+			},
+		},
+	}
+
+	payload := map[string]interface{}{
+		"fields": map[string]interface{}{
+			"project": map[string]interface{}{
+				"key": projectKey,
+			},
+			"summary": summary,
+			"issuetype": map[string]interface{}{
+				"name": issueType,
+			},
+			"description": adfDesc,
+		},
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+
+	endpoint := fmt.Sprintf("%s/ex/jira/%s/rest/api/3/issue", r.JiraBaseURL, token.CloudID)
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "spark-mcp-gateway/3.0")
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes))
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("jira api error (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var created struct {
+		ID  string `json:"id"`
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(respBody, &created); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("Successfully created Jira issue %s in %s: %s", created.Key, projectKey, summary), nil
+}
+
+func (r *Registry) handleJiraSearchIssues(ctx context.Context, args map[string]interface{}, token *vault.TokenData) (string, error) {
+	if token == nil || token.AccessToken == "" {
+		return "", errors.New("jira connection required: please connect Jira Cloud on gateway dashboard")
+	}
+	if token.CloudID == "" {
+		return "", errors.New("jira cloudId missing from connection: please reconnect Jira")
+	}
+
+	rawJQL := strings.TrimSpace(getStringArg(args, "jql", ""))
+	projectKey := strings.TrimSpace(getStringArg(args, "project_key", ""))
+
+	if projectKey != "" {
+		if !isJiraSpaceAllowed(token, projectKey) {
+			return "", fmt.Errorf("jira space %q is not in allowed_space_keys %v", projectKey, token.AllowedSpaceKeys)
+		}
+	}
+
+	var jql string
+	if len(token.AllowedSpaceKeys) > 0 {
+		var quotedProjects []string
+		for _, k := range token.AllowedSpaceKeys {
+			quotedProjects = append(quotedProjects, fmt.Sprintf("%q", k))
+		}
+		scopeClause := fmt.Sprintf("project IN (%s)", strings.Join(quotedProjects, ", "))
+		if projectKey != "" {
+			scopeClause = fmt.Sprintf("project = %q", projectKey)
+		}
+		if rawJQL == "" {
+			jql = scopeClause + " ORDER BY updated DESC"
+		} else {
+			jql = scopeClause + " AND (" + rawJQL + ")"
+		}
+	} else {
+		if projectKey != "" {
+			if rawJQL == "" {
+				jql = fmt.Sprintf("project = %q ORDER BY updated DESC", projectKey)
+			} else {
+				jql = fmt.Sprintf("project = %q AND (%s)", projectKey, rawJQL)
+			}
+		} else {
+			if rawJQL == "" {
+				jql = "ORDER BY updated DESC"
+			} else {
+				jql = rawJQL
+			}
+		}
+	}
+
+	endpoint := fmt.Sprintf("%s/ex/jira/%s/rest/api/3/search?jql=%s&maxResults=20", r.JiraBaseURL, token.CloudID, url.QueryEscape(jql))
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "spark-mcp-gateway/3.0")
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes))
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("jira api error (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+
+	var searchRes struct {
+		Issues []struct {
+			Key    string `json:"key"`
+			Fields struct {
+				Summary string `json:"summary"`
+				Status  struct {
+					Name string `json:"name"`
+				} `json:"status"`
+			} `json:"fields"`
+		} `json:"issues"`
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(body, &searchRes); err != nil {
+		return "", err
+	}
+
+	if len(searchRes.Issues) == 0 {
+		return fmt.Sprintf("No issues found matching JQL: %s", jql), nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Found %d Jira issues (JQL: %s):\n", len(searchRes.Issues), jql))
+	for _, iss := range searchRes.Issues {
+		status := iss.Fields.Status.Name
+		if status == "" {
+			status = "Unknown"
+		}
+		sb.WriteString(fmt.Sprintf("- %s: %s [%s]\n", iss.Key, iss.Fields.Summary, status))
+	}
+
+	return sb.String(), nil
 }

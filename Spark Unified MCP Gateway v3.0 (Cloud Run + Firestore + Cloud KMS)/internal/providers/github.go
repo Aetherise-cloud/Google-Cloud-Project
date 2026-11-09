@@ -121,6 +121,10 @@ func (r *Registry) handleGitHubListPRs(ctx context.Context, args map[string]inte
 		return "", errors.New("missing required arguments: owner and repo")
 	}
 
+	if !isGitHubReadAllowed(token, owner, repo) {
+		return "", fmt.Errorf("repository %s/%s is not in allowed GitHub read scope (selected_orgs / allowed_read_repos)", owner, repo)
+	}
+
 	state := getStringArg(args, "state", "open")
 	endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls?per_page=20&state=%s", r.GitHubBaseURL, url.PathEscape(owner), url.PathEscape(repo), url.QueryEscape(state))
 
@@ -226,6 +230,10 @@ func (r *Registry) handleGitHubReadFile(ctx context.Context, args map[string]int
 		return "", fmt.Errorf("invalid repository owner %q or repo %q", owner, repo)
 	}
 
+	if !isGitHubReadAllowed(token, owner, repo) {
+		return "", fmt.Errorf("repository %s/%s is not in allowed GitHub read scope (selected_orgs / allowed_read_repos)", owner, repo)
+	}
+
 	safePath, err := sanitizeGitHubFilePath(filePath)
 	if err != nil {
 		return "", fmt.Errorf("path validation failed: %w", err)
@@ -268,9 +276,34 @@ func isDynamicRepoAllowed(allowedCSV, owner, repo string) bool {
 		return false
 	}
 	target := strings.ToLower(owner + "/" + repo)
+	ownerLower := strings.ToLower(owner)
 	for _, entry := range strings.Split(allowedCSV, ",") {
 		entry = strings.TrimSpace(strings.ToLower(entry))
 		if entry == "*" || entry == target {
+			return true
+		}
+		if strings.HasSuffix(entry, "/*") {
+			orgPrefix := strings.TrimSuffix(entry, "/*")
+			if orgPrefix == ownerLower {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isGitHubReadAllowed(token *vault.TokenData, owner, repo string) bool {
+	if token == nil || (len(token.AllowedReadRepos) == 0 && len(token.SelectedOrgs) == 0) {
+		return true
+	}
+	ownerLower := strings.ToLower(owner)
+	for _, org := range token.SelectedOrgs {
+		if strings.ToLower(strings.TrimSpace(org)) == ownerLower {
+			return true
+		}
+	}
+	if len(token.AllowedReadRepos) > 0 {
+		if isDynamicRepoAllowed(strings.Join(token.AllowedReadRepos, ","), owner, repo) {
 			return true
 		}
 	}

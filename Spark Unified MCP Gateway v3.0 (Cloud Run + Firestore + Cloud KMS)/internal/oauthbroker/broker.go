@@ -74,6 +74,12 @@ func (b *Broker) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/connectors/{app}/oauth-config", b.handleOAuthConfig)
 	mux.HandleFunc("POST /api/connectors/github/pat", b.handleGitHubPAT)
 	mux.HandleFunc("POST /api/connectors/custom", b.handleCustomConnector)
+
+	// V4 Workspace Discovery & Persistence endpoints
+	mux.HandleFunc("GET /api/connectors/github/workspaces", b.handleGitHubWorkspaces)
+	mux.HandleFunc("GET /api/connectors/jira/workspaces", b.handleJiraWorkspaces)
+	mux.HandleFunc("POST /api/connectors/workspaces", b.handleSaveWorkspaces)
+	mux.HandleFunc("GET /api/catalog/templates", b.handleCatalogTemplates)
 }
 
 // ResolveOAuthCredentials resolves OAuth Client ID and Secret from TokenVault (__oauth_app_config__) with fallback to env.
@@ -118,8 +124,8 @@ func (b *Broker) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		b.buildConnectorView(r.Context(), adminEmail, "jira", "Atlassian Jira", "Issue inspection and status transitions"),
 		{
 			ID:            "gcp",
-			Name:          "Google Cloud Run",
-			Description:   "Cloud Run inspection via keyless ADC",
+			Name:          "Google Cloud Platform (GCP MCP)",
+			Description:   "Read-only Cloud Run, Logging, Storage, Artifact Registry, Monitoring & IAM via keyless ADC",
 			Connected:     true,
 			KeylessADC:    true,
 			ConnectorType: "keyless_adc",
@@ -140,6 +146,35 @@ func (b *Broker) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			ScopeMode:     "read_only",
 			AccountLabel:  fmt.Sprintf("%s (Keyless ADC)", b.cfg.GCPProjectID),
 		},
+		func() ui.ConnectorView {
+			gflowView := ui.ConnectorView{
+				ID:            "gflow",
+				Name:          "Google Flow (gflow MCP)",
+				Description:   "AI image (Nano Banana / Imagen) & video (Veo) generation, upscaling & character catalog",
+				Connected:     true,
+				KeylessADC:    true,
+				ConnectorType: "keyless_adc",
+				OAuthConfigOK: true,
+				TemplateID:    "gflow",
+				ScopeMode:     "full_access",
+				AccountLabel:  fmt.Sprintf("%s (Keyless ADC + Flow)", b.cfg.GCPProjectID),
+			}
+			if conn, err := b.store.GetConnection(r.Context(), adminEmail, "gflow"); err == nil && conn != nil {
+				if tok, err := b.vault.DecryptConnection(r.Context(), conn); err == nil && tok != nil {
+					if tok.EndpointURL != "" {
+						gflowView.EndpointURL = tok.EndpointURL
+						gflowView.ConnectorType = "remote_mcp"
+					}
+					if tok.AccountLabel != "" {
+						gflowView.AccountLabel = tok.AccountLabel
+					}
+					if tok.Scope != "" {
+						gflowView.ScopeMode = tok.Scope
+					}
+				}
+			}
+			return gflowView
+		}(),
 	}
 
 	// Add custom connectors registered for this admin
@@ -208,6 +243,12 @@ func (b *Broker) buildConnectorView(ctx context.Context, adminEmail, id, name, d
 				view.ScopeMode = "read_only"
 			}
 			view.AccountLabel = token.AccountLabel
+			view.SelectedOrgs = token.SelectedOrgs
+			view.AllowedReadRepos = token.AllowedReadRepos
+			view.AllowedWriteRepos = splitCSV(token.AllowedWriteRepos)
+			view.AllowedSpaceKeys = token.AllowedSpaceKeys
+			view.SiteName = token.SiteName
+			view.CloudID = token.CloudID
 			if !conn.UpdatedAt.IsZero() {
 				view.UpdatedAt = conn.UpdatedAt.Format("2006-01-02 15:04:05")
 			}
@@ -475,6 +516,7 @@ func (b *Broker) exchangeJiraCode(ctx context.Context, code, verifier, mode stri
 
 	cloudID := ""
 	siteURL := ""
+	siteName := ""
 	accountLabel := "Atlassian Jira"
 
 	resReq, err := http.NewRequestWithContext(ctx, "GET", b.AtlassianAPIURL+"/oauth/token/accessible-resources", nil)
@@ -491,6 +533,7 @@ func (b *Broker) exchangeJiraCode(ctx context.Context, code, verifier, mode stri
 			if err := json.NewDecoder(resResp.Body).Decode(&resources); err == nil && len(resources) > 0 {
 				cloudID = resources[0].ID
 				siteURL = resources[0].URL
+				siteName = resources[0].Name
 				accountLabel = fmt.Sprintf("%s (%s)", resources[0].Name, resources[0].URL)
 			}
 		}
@@ -500,18 +543,57 @@ func (b *Broker) exchangeJiraCode(ctx context.Context, code, verifier, mode stri
 		return nil, errors.New("no accessible Jira sites found for user account")
 	}
 
+	// Best-effort call to project search to discover and bind default allowed spaces
+	var allowedSpaceKeys []string
+	projReq, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/ex/jira/%s/rest/api/3/project/search", b.AtlassianAPIURL, cloudID), nil)
+	if err == nil {
+		projReq.Header.Set("Authorization", "Bearer "+tokenRes.AccessToken)
+		projReq.Header.Set("Accept", "application/json")
+		if projResp, err := b.httpClient.Do(projReq); err == nil {
+			defer projResp.Body.Close()
+			if projResp.StatusCode == http.StatusOK {
+				bodyBytes, _ := io.ReadAll(projResp.Body)
+				var searchRes struct {
+					Values []struct {
+						Key string `json:"key"`
+					} `json:"values"`
+				}
+				if err := json.Unmarshal(bodyBytes, &searchRes); err == nil && len(searchRes.Values) > 0 {
+					for _, v := range searchRes.Values {
+						if v.Key != "" {
+							allowedSpaceKeys = append(allowedSpaceKeys, v.Key)
+						}
+					}
+				} else {
+					var rawList []struct {
+						Key string `json:"key"`
+					}
+					if err := json.Unmarshal(bodyBytes, &rawList); err == nil && len(rawList) > 0 {
+						for _, v := range rawList {
+							if v.Key != "" {
+								allowedSpaceKeys = append(allowedSpaceKeys, v.Key)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	expiresAt := time.Now().Add(time.Duration(tokenRes.ExpiresIn) * time.Second)
 
 	return &vault.TokenData{
-		AccessToken:   tokenRes.AccessToken,
-		RefreshToken:  tokenRes.RefreshToken,
-		ConnectorType: "oauth2",
-		ExpiresAt:     expiresAt,
-		Scope:         mode,
-		CloudID:       cloudID,
-		SiteURL:       siteURL,
-		AccountLabel:  accountLabel,
-		UpdatedAt:     time.Now(),
+		AccessToken:      tokenRes.AccessToken,
+		RefreshToken:     tokenRes.RefreshToken,
+		ConnectorType:    "oauth2",
+		ExpiresAt:        expiresAt,
+		Scope:            mode,
+		CloudID:          cloudID,
+		SiteURL:          siteURL,
+		SiteName:         siteName,
+		AccountLabel:     accountLabel,
+		AllowedSpaceKeys: allowedSpaceKeys,
+		UpdatedAt:        time.Now(),
 	}, nil
 }
 
@@ -884,6 +966,28 @@ func (b *Broker) handleListConnections(w http.ResponseWriter, r *http.Request) {
 			"keyless_adc": true,
 			"scope_mode":  "read_only",
 		},
+		"gflow": map[string]interface{}{
+			"connected":   true,
+			"keyless_adc": true,
+			"scope_mode":  "full_access",
+		},
+	}
+
+	if conn, err := b.store.GetConnection(r.Context(), adminEmail, "gflow"); err == nil && conn != nil {
+		if tok, err := b.vault.DecryptConnection(r.Context(), conn); err == nil && tok != nil {
+			if gflowMap, ok := resp["gflow"].(map[string]interface{}); ok {
+				if tok.Scope != "" {
+					gflowMap["scope_mode"] = tok.Scope
+				}
+				if tok.AccountLabel != "" {
+					gflowMap["account_label"] = tok.AccountLabel
+				}
+				if tok.EndpointURL != "" {
+					gflowMap["endpoint_url"] = tok.EndpointURL
+					gflowMap["connector_type"] = "remote_mcp"
+				}
+			}
+		}
 	}
 
 	if conns, err := b.store.ListConnections(r.Context(), adminEmail); err == nil {
@@ -905,4 +1009,472 @@ func (b *Broker) handleListConnections(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// GET /api/connectors/github/workspaces
+func (b *Broker) handleGitHubWorkspaces(w http.ResponseWriter, r *http.Request) {
+	adminEmail, err := b.session.GetAdminSession(r)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	tok, err := b.vault.GetValidAccessToken(r.Context(), adminEmail, "github")
+	if err != nil || tok == nil || tok.AccessToken == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "not_connected",
+			"error_description": "GitHub is not connected",
+		})
+		return
+	}
+
+	var orgs []string
+	orgsReq, err := http.NewRequestWithContext(r.Context(), "GET", b.GitHubAPIURL+"/user/orgs", nil)
+	if err == nil {
+		orgsReq.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+		orgsReq.Header.Set("Accept", "application/vnd.github.v3+json")
+		orgsReq.Header.Set("User-Agent", "Spark-Unified-MCP-Gateway")
+		if resp, err := b.httpClient.Do(orgsReq); err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				var orgList []struct {
+					Login string `json:"login"`
+				}
+				if err := json.NewDecoder(resp.Body).Decode(&orgList); err == nil {
+					for _, o := range orgList {
+						if o.Login != "" {
+							orgs = append(orgs, o.Login)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	var repos []string
+	repoSeen := make(map[string]bool)
+	reposReq, err := http.NewRequestWithContext(r.Context(), "GET", b.GitHubAPIURL+"/user/repos?per_page=100&sort=updated", nil)
+	if err == nil {
+		reposReq.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+		reposReq.Header.Set("Accept", "application/vnd.github.v3+json")
+		reposReq.Header.Set("User-Agent", "Spark-Unified-MCP-Gateway")
+		if resp, err := b.httpClient.Do(reposReq); err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				var repoList []struct {
+					FullName string `json:"full_name"`
+				}
+				if err := json.NewDecoder(resp.Body).Decode(&repoList); err == nil {
+					for _, rp := range repoList {
+						if rp.FullName != "" && !repoSeen[rp.FullName] {
+							repoSeen[rp.FullName] = true
+							repos = append(repos, rp.FullName)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for i, org := range orgs {
+		if i >= 5 {
+			break
+		}
+		oReq, err := http.NewRequestWithContext(r.Context(), "GET", fmt.Sprintf("%s/orgs/%s/repos?per_page=50", b.GitHubAPIURL, url.PathEscape(org)), nil)
+		if err == nil {
+			oReq.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+			oReq.Header.Set("Accept", "application/vnd.github.v3+json")
+			oReq.Header.Set("User-Agent", "Spark-Unified-MCP-Gateway")
+			if oResp, err := b.httpClient.Do(oReq); err == nil {
+				defer oResp.Body.Close()
+				if oResp.StatusCode == http.StatusOK {
+					var orgRepos []struct {
+						FullName string `json:"full_name"`
+					}
+					if err := json.NewDecoder(oResp.Body).Decode(&orgRepos); err == nil {
+						for _, rp := range orgRepos {
+							if rp.FullName != "" && !repoSeen[rp.FullName] {
+								repoSeen[rp.FullName] = true
+								repos = append(repos, rp.FullName)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	selectedOrgs := tok.SelectedOrgs
+	if selectedOrgs == nil {
+		selectedOrgs = []string{}
+	}
+	allowedRead := tok.AllowedReadRepos
+	if allowedRead == nil {
+		allowedRead = []string{}
+	}
+	allowedWrite := splitCSV(tok.AllowedWriteRepos)
+	if allowedWrite == nil {
+		allowedWrite = []string{}
+	}
+	if orgs == nil {
+		orgs = []string{}
+	}
+	if repos == nil {
+		repos = []string{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"orgs":                orgs,
+		"repos":               repos,
+		"selected_orgs":       selectedOrgs,
+		"allowed_read_repos":  allowedRead,
+		"allowed_write_repos": allowedWrite,
+	})
+}
+
+// GET /api/connectors/jira/workspaces
+func (b *Broker) handleJiraWorkspaces(w http.ResponseWriter, r *http.Request) {
+	adminEmail, err := b.session.GetAdminSession(r)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	tok, err := b.vault.GetValidAccessToken(r.Context(), adminEmail, "jira")
+	if err != nil || tok == nil || tok.AccessToken == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "not_connected",
+			"error_description": "Jira is not connected",
+		})
+		return
+	}
+
+	type JiraSpace struct {
+		Key  string `json:"key"`
+		Name string `json:"name"`
+	}
+	var spaces []JiraSpace
+
+	if tok.CloudID != "" {
+		projURL := fmt.Sprintf("%s/ex/jira/%s/rest/api/3/project/search", b.AtlassianAPIURL, tok.CloudID)
+		pReq, err := http.NewRequestWithContext(r.Context(), "GET", projURL, nil)
+		if err == nil {
+			pReq.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+			pReq.Header.Set("Accept", "application/json")
+			if pResp, err := b.httpClient.Do(pReq); err == nil {
+				defer pResp.Body.Close()
+				if pResp.StatusCode == http.StatusOK {
+					bodyBytes, _ := io.ReadAll(pResp.Body)
+					var searchRes struct {
+						Values []JiraSpace `json:"values"`
+					}
+					if err := json.Unmarshal(bodyBytes, &searchRes); err == nil && len(searchRes.Values) > 0 {
+						spaces = searchRes.Values
+					} else {
+						var rawList []JiraSpace
+						if err := json.Unmarshal(bodyBytes, &rawList); err == nil {
+							spaces = rawList
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if spaces == nil {
+		spaces = []JiraSpace{}
+	}
+	allowedSpaceKeys := tok.AllowedSpaceKeys
+	if allowedSpaceKeys == nil {
+		allowedSpaceKeys = []string{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"cloud_id":           tok.CloudID,
+		"site_url":           tok.SiteURL,
+		"site_name":          tok.SiteName,
+		"spaces":             spaces,
+		"allowed_space_keys": allowedSpaceKeys,
+	})
+}
+
+// POST /api/connectors/workspaces
+func (b *Broker) handleSaveWorkspaces(w http.ResponseWriter, r *http.Request) {
+	adminEmail, err := b.session.GetAdminSession(r)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	var provider, csrf string
+	var selectedOrgs, allowedReadRepos, allowedWriteRepos, allowedSpaceKeys []string
+	isJSON := strings.Contains(r.Header.Get("Content-Type"), "application/json")
+
+	if isJSON {
+		var req struct {
+			CSRFToken         string   `json:"csrf_token"`
+			Provider          string   `json:"provider"`
+			SelectedOrgs      []string `json:"selected_orgs"`
+			AllowedReadRepos  []string `json:"allowed_read_repos"`
+			AllowedWriteRepos []string `json:"allowed_write_repos"`
+			AllowedSpaceKeys  []string `json:"allowed_space_keys"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_json"})
+			return
+		}
+		csrf = req.CSRFToken
+		provider = strings.ToLower(strings.TrimSpace(req.Provider))
+		selectedOrgs = req.SelectedOrgs
+		allowedReadRepos = req.AllowedReadRepos
+		allowedWriteRepos = req.AllowedWriteRepos
+		allowedSpaceKeys = req.AllowedSpaceKeys
+	} else {
+		_ = r.ParseForm()
+		csrf = r.FormValue("csrf_token")
+		provider = strings.ToLower(strings.TrimSpace(r.FormValue("provider")))
+		selectedOrgs = parseFormStringSlice(r.Form, "selected_orgs")
+		allowedReadRepos = parseFormStringSlice(r.Form, "allowed_read_repos")
+		allowedWriteRepos = parseFormStringSlice(r.Form, "allowed_write_repos")
+		allowedSpaceKeys = parseFormStringSlice(r.Form, "allowed_space_keys")
+	}
+
+	if csrf == "" {
+		csrf = r.Header.Get("X-CSRF-Token")
+	}
+	if !b.session.ValidateCSRFToken(csrf, adminEmail) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_csrf"})
+		return
+	}
+
+	if provider != "github" && provider != "jira" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_provider", "error_description": "provider must be 'github' or 'jira'"})
+		return
+	}
+
+	conn, err := b.store.GetConnection(r.Context(), adminEmail, provider)
+	if err != nil || conn == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "not_connected", "error_description": fmt.Sprintf("%s is not connected", provider)})
+		return
+	}
+
+	tok, err := b.vault.DecryptConnection(r.Context(), conn)
+	if err != nil || tok == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "decryption_failed"})
+		return
+	}
+
+	if provider == "github" {
+		tok.SelectedOrgs = selectedOrgs
+		tok.AllowedReadRepos = allowedReadRepos
+		tok.AllowedWriteRepos = strings.Join(allowedWriteRepos, ",")
+	} else if provider == "jira" {
+		tok.AllowedSpaceKeys = allowedSpaceKeys
+	}
+	tok.UpdatedAt = time.Now()
+
+	if err := b.vault.StoreToken(r.Context(), adminEmail, provider, tok); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "store_failed"})
+		return
+	}
+
+	if isJSON || strings.Contains(r.Header.Get("Accept"), "application/json") {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+		return
+	}
+
+	http.Redirect(w, r, "/dashboard?flash=Workspace+scopes+updated", http.StatusSeeOther)
+}
+
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	var result []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+func parseFormStringSlice(form url.Values, key string) []string {
+	vals, exists := form[key]
+	if !exists || len(vals) == 0 {
+		return nil
+	}
+	var res []string
+	for _, v := range vals {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		if strings.Contains(v, ",") {
+			for _, part := range strings.Split(v, ",") {
+				part = strings.TrimSpace(part)
+				if part != "" {
+					res = append(res, part)
+				}
+			}
+		} else {
+			res = append(res, v)
+		}
+	}
+	return res
+}
+
+// CatalogTemplate describes a connector template available in the catalog.
+type CatalogTemplate struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	Category      string `json:"category"`
+	ConnectorType string `json:"connector_type"`
+	Badge         string `json:"badge"`
+}
+
+// CatalogTemplates returns the predefined templates for available connectors.
+func CatalogTemplates() []CatalogTemplate {
+	return []CatalogTemplate{
+		{
+			ID:            "github",
+			Name:          "GitHub",
+			Description:   "Repository issues, code search, and PRs via OAuth 2.0 or Personal Access Token.",
+			Category:      "dev",
+			ConnectorType: "oauth2",
+			Badge:         "OAuth / PAT",
+		},
+		{
+			ID:            "jira",
+			Name:          "Atlassian Jira",
+			Description:   "Jira workspace project and issue tracking via Atlassian 3LO OAuth 2.0.",
+			Category:      "dev prod",
+			ConnectorType: "oauth2",
+			Badge:         "3LO OAuth",
+		},
+		{
+			ID:            "gcp",
+			Name:          "Google Cloud Platform (GCP MCP)",
+			Description:   "Read-only Cloud Run, Logging, Storage, Artifact Registry, Monitoring & IAM via keyless ADC",
+			Category:      "dev mcp",
+			ConnectorType: "keyless_adc",
+			Badge:         "Keyless ADC",
+		},
+		{
+			ID:            "gdk",
+			Name:          "Google Developer Knowledge",
+			Description:   "Developer Knowledge documentation search via keyless ADC",
+			Category:      "dev mcp",
+			ConnectorType: "keyless_adc",
+			Badge:         "Keyless ADC",
+		},
+		{
+			ID:            "gflow",
+			Name:          "Google Flow (gflow MCP)",
+			Description:   "AI image (Nano Banana / Imagen) & video (Veo) generation, upscaling & character catalog",
+			Category:      "mcp prod",
+			ConnectorType: "keyless_adc",
+			Badge:         "Keyless ADC + Flow",
+		},
+		{
+			ID:            "linear",
+			Name:          "Linear",
+			Description:   "Linear issues and project sync via Remote MCP at mcp.linear.app + API Key.",
+			Category:      "mcp prod",
+			ConnectorType: "remote_mcp",
+			Badge:         "Remote MCP",
+		},
+		{
+			ID:            "notion",
+			Name:          "Notion",
+			Description:   "Workspaces, databases, and pages via Notion API + Integration Secret.",
+			Category:      "prod",
+			ConnectorType: "rest_api",
+			Badge:         "REST / MCP",
+		},
+		{
+			ID:            "slack",
+			Name:          "Slack",
+			Description:   "Workspace channels, message search, and posting via Slack Bot Token.",
+			Category:      "prod",
+			ConnectorType: "rest_api",
+			Badge:         "REST / MCP",
+		},
+		{
+			ID:            "cloudflare",
+			Name:          "Cloudflare",
+			Description:   "DNS, Workers, and KV management via Cloudflare Remote MCP / API Token.",
+			Category:      "mcp dev",
+			ConnectorType: "remote_mcp",
+			Badge:         "Remote MCP",
+		},
+		{
+			ID:            "sentry",
+			Name:          "Sentry",
+			Description:   "Application error issues, stack traces, and releases via Sentry MCP / Auth Token.",
+			Category:      "mcp dev",
+			ConnectorType: "remote_mcp",
+			Badge:         "Remote MCP",
+		},
+		{
+			ID:            "supabase",
+			Name:          "Supabase",
+			Description:   "Postgres tables, storage, and auth via Supabase Remote MCP + PAT.",
+			Category:      "mcp dev",
+			ConnectorType: "remote_mcp",
+			Badge:         "Remote MCP",
+		},
+		{
+			ID:            "custom_mcp",
+			Name:          "Custom Remote MCP Server",
+			Description:   "Streamable HTTP JSON-RPC /mcp upstream endpoint + optional Bearer Token.",
+			Category:      "custom mcp",
+			ConnectorType: "remote_mcp",
+			Badge:         "Custom",
+		},
+		{
+			ID:            "custom_api",
+			Name:          "Custom REST API Connector",
+			Description:   "Any enterprise HTTPS REST API endpoint + custom Authorization Header.",
+			Category:      "custom",
+			ConnectorType: "rest_api",
+			Badge:         "Custom",
+		},
+	}
+}
+
+func (b *Broker) handleCatalogTemplates(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(CatalogTemplates())
 }

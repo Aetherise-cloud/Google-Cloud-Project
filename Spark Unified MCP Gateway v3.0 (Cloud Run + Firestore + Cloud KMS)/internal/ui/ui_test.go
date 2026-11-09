@@ -607,6 +607,71 @@ func TestRenderAuthorize(t *testing.T) {
 			t.Errorf("expected HTML escaping of script tags")
 		}
 	})
+
+	t.Run("GFlow and GCP scope configuration in Authorize", func(t *testing.T) {
+		gConnectors := []ui.ConnectorView{
+			{
+				ID:         "gcp",
+				Name:       "Google Cloud Platform (GCP MCP)",
+				Connected:  true,
+				KeylessADC: true,
+				ScopeMode:  "read_only",
+			},
+			{
+				ID:         "gflow",
+				Name:       "Google Flow (gflow MCP)",
+				Connected:  true,
+				KeylessADC: true,
+				ScopeMode:  "read_only",
+			},
+		}
+
+		rec := httptest.NewRecorder()
+		data := ui.AuthorizePageData{
+			AdminEmail:    "admin@example.com",
+			ServiceURL:    "https://gateway.example.com",
+			ClientID:      "test-client-id",
+			ClientName:    "Test Client",
+			RedirectURI:   "https://client.example.com/callback",
+			CSRFToken:     "csrf-auth",
+			DefaultPreset: "read_only",
+			Connectors:    gConnectors,
+		}
+
+		err := ui.RenderAuthorize(rec, http.StatusOK, data)
+		if err != nil {
+			t.Fatalf("RenderAuthorize failed: %v", err)
+		}
+
+		body := rec.Body.String()
+
+		// Verify custom scope wrapper
+		if !strings.Contains(body, `id="custom-scope-wrapper"`) {
+			t.Errorf("expected id=\"custom-scope-wrapper\" in authorize page")
+		}
+
+		// Verify gflow scope dropdown with full_access, read_only, and none
+		if !strings.Contains(body, `id="scope_gflow"`) {
+			t.Errorf("expected id=\"scope_gflow\" in authorize page")
+		}
+		if !strings.Contains(body, `<option value="full_access" selected>Full Access (AI Image &amp; Video Generation + Catalog)</option>`) {
+			t.Errorf("expected full_access option for scope_gflow")
+		}
+		if !strings.Contains(body, `<option value="read_only">Read Only (Models, Projects, Characters &amp; Credits Only)</option>`) {
+			t.Errorf("expected read_only option for scope_gflow")
+		}
+		if !strings.Contains(body, `<option value="none">None (Disabled)</option>`) {
+			t.Errorf("expected none option for scope_gflow")
+		}
+
+		// Verify gcp scope dropdown
+		if !strings.Contains(body, `id="scope_gcp"`) {
+			t.Errorf("expected id=\"scope_gcp\" in authorize page")
+		}
+		if !strings.Contains(body, `<option value="read_only" selected>Read Only (Keyless ADC)</option>`) {
+			t.Errorf("expected Read Only (Keyless ADC) option for scope_gcp")
+		}
+	})
 }
 
 func TestRenderAuthorize_CustomConnectors(t *testing.T) {
@@ -879,5 +944,317 @@ func TestStrictPostMessageSecurityPolicy(t *testing.T) {
 		if !strings.Contains(cspHeader, "frame-ancestors 'none'") {
 			t.Errorf("[%s] CSP header missing frame-ancestors 'none'", pageName)
 		}
+	}
+}
+
+func TestRenderDashboard_WorkspacePicker(t *testing.T) {
+	connectors := []ui.ConnectorView{
+		{
+			ID:                "github",
+			Name:              "GitHub",
+			Description:       "GitHub integration",
+			Connected:         true,
+			ConnectorType:     "oauth2",
+			SelectedOrgs:      []string{"aetherise-cloud"},
+			AllowedReadRepos:  []string{"aetherise-cloud/*"},
+			AllowedWriteRepos: []string{"aetherise-cloud/spark-mcp-gateway"},
+		},
+		{
+			ID:               "jira",
+			Name:             "Atlassian Jira",
+			Description:      "Jira integration",
+			Connected:        true,
+			ConnectorType:    "oauth2",
+			SiteName:         "aetherise.atlassian.net",
+			CloudID:          "cloud-id-test",
+			AllowedSpaceKeys: []string{"SPARK", "ONB"},
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	data := ui.DashboardPageData{
+		AdminEmail:  "admin@example.com",
+		ServiceURL:  "https://gateway.example.com",
+		MCPEndpoint: "https://gateway.example.com/mcp",
+		CSRFToken:   "csrf-token-ws",
+		Connectors:  connectors,
+	}
+
+	err := ui.RenderDashboard(rec, http.StatusOK, data)
+	if err != nil {
+		t.Fatalf("RenderDashboard failed: %v", err)
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	assertSecurityHeaders(t, rec)
+	body := rec.Body.String()
+
+	// Verify Modal 4 presence and functions
+	if !strings.Contains(body, `id="workspace-modal"`) {
+		t.Errorf("expected id=\"workspace-modal\" in dashboard")
+	}
+	if !strings.Contains(body, "openWorkspaceModal") {
+		t.Errorf("expected openWorkspaceModal in dashboard")
+	}
+	if !strings.Contains(body, `onclick="openWorkspaceModal('github')"`) {
+		t.Errorf("expected openWorkspaceModal('github') button in dashboard")
+	}
+	if !strings.Contains(body, `onclick="openWorkspaceModal('jira')"`) {
+		t.Errorf("expected openWorkspaceModal('jira') button in dashboard")
+	}
+
+	// Verify rendered metadata in connector cards
+	if !strings.Contains(body, "aetherise-cloud") {
+		t.Errorf("expected SelectedOrgs to render in dashboard")
+	}
+	if !strings.Contains(body, "aetherise-cloud/*") {
+		t.Errorf("expected AllowedReadRepos to render in dashboard")
+	}
+	if !strings.Contains(body, "aetherise-cloud/spark-mcp-gateway") {
+		t.Errorf("expected AllowedWriteRepos to render in dashboard")
+	}
+	if !strings.Contains(body, "SPARK") || !strings.Contains(body, "ONB") {
+		t.Errorf("expected AllowedSpaceKeys to render in dashboard")
+	}
+	if !strings.Contains(body, "aetherise.atlassian.net") {
+		t.Errorf("expected SiteName to render in dashboard")
+	}
+
+	// Verify workspace modal elements
+	if !strings.Contains(body, `id="ws-gh-orgs-list"`) {
+		t.Errorf("expected ws-gh-orgs-list in workspace modal")
+	}
+	if !strings.Contains(body, `id="ws-gh-read-repos-list"`) {
+		t.Errorf("expected ws-gh-read-repos-list in workspace modal")
+	}
+	if !strings.Contains(body, `id="ws-gh-write-repos-list"`) {
+		t.Errorf("expected ws-gh-write-repos-list in workspace modal")
+	}
+	if !strings.Contains(body, `id="ws-jira-spaces-list"`) {
+		t.Errorf("expected ws-jira-spaces-list in workspace modal")
+	}
+	if !strings.Contains(body, `id="btn-save-workspace"`) {
+		t.Errorf("expected btn-save-workspace in workspace modal")
+	}
+}
+
+func TestRenderAuthorize_WorkspacePicker(t *testing.T) {
+	connectors := []ui.ConnectorView{
+		{
+			ID:                "github",
+			Name:              "GitHub",
+			Description:       "GitHub integration",
+			Connected:         true,
+			ConnectorType:     "oauth2",
+			SelectedOrgs:      []string{"aetherise-cloud"},
+			AllowedReadRepos:  []string{"aetherise-cloud/*"},
+			AllowedWriteRepos: []string{"aetherise-cloud/spark-mcp-gateway"},
+		},
+		{
+			ID:               "jira",
+			Name:             "Atlassian Jira",
+			Description:      "Jira integration",
+			Connected:        true,
+			ConnectorType:    "oauth2",
+			SiteName:         "aetherise.atlassian.net",
+			CloudID:          "cloud-id-test",
+			AllowedSpaceKeys: []string{"SPARK", "ONB"},
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	data := ui.AuthorizePageData{
+		AdminEmail:        "admin@example.com",
+		ServiceURL:        "https://gateway.example.com",
+		ClientID:          "test-client-id",
+		ClientName:        "Test MCP Client",
+		RedirectURI:       "https://client.example.com/callback",
+		State:             "state123",
+		CodeChallenge:     "challenge123",
+		CodeChallengeMeth: "S256",
+		Resource:          "https://gateway.example.com/mcp",
+		CSRFToken:         "csrf-token-auth",
+		DefaultPreset:     "read_only",
+		Connectors:        connectors,
+	}
+
+	err := ui.RenderAuthorize(rec, http.StatusOK, data)
+	if err != nil {
+		t.Fatalf("RenderAuthorize failed: %v", err)
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	assertSecurityHeaders(t, rec)
+	body := rec.Body.String()
+
+	// Verify required card IDs
+	if !strings.Contains(body, `id="workspace-picker-github"`) {
+		t.Errorf("expected id=\"workspace-picker-github\" in authorize page")
+	}
+	if !strings.Contains(body, `id="workspace-picker-jira"`) {
+		t.Errorf("expected id=\"workspace-picker-jira\" in authorize page")
+	}
+
+	// Verify discovery buttons and functions
+	if !strings.Contains(body, "loadGitHubWorkspacesForAuthorize()") {
+		t.Errorf("expected loadGitHubWorkspacesForAuthorize() button in authorize page")
+	}
+	if !strings.Contains(body, "loadJiraWorkspacesForAuthorize()") {
+		t.Errorf("expected loadJiraWorkspacesForAuthorize() button in authorize page")
+	}
+
+	// Verify fallback inputs
+	if !strings.Contains(body, `id="auth-gh-write-repos"`) || !strings.Contains(body, `name="allowed_write_repos"`) {
+		t.Errorf("expected fallback input id=\"auth-gh-write-repos\" with name=\"allowed_write_repos\"")
+	}
+	if !strings.Contains(body, `id="auth-jira-space-keys"`) || !strings.Contains(body, `name="allowed_space_keys"`) {
+		t.Errorf("expected fallback input id=\"auth-jira-space-keys\" with name=\"allowed_space_keys\"")
+	}
+
+	// Verify rendered pre-configured items
+	if !strings.Contains(body, "aetherise-cloud") {
+		t.Errorf("expected pre-configured SelectedOrgs in authorize page")
+	}
+	if !strings.Contains(body, "aetherise-cloud/*") {
+		t.Errorf("expected pre-configured AllowedReadRepos in authorize page")
+	}
+	if !strings.Contains(body, "aetherise-cloud/spark-mcp-gateway") {
+		t.Errorf("expected pre-configured AllowedWriteRepos in authorize page")
+	}
+	if !strings.Contains(body, "SPARK") || !strings.Contains(body, "ONB") {
+		t.Errorf("expected pre-configured AllowedSpaceKeys in authorize page")
+	}
+	if !strings.Contains(body, "aetherise.atlassian.net") {
+		t.Errorf("expected SiteName in authorize page")
+	}
+}
+
+func TestRenderDashboard_GCPAndGFlowMCP(t *testing.T) {
+	connectors := []ui.ConnectorView{
+		{
+			ID:           "gcp",
+			Name:         "Google Cloud Platform (GCP MCP)",
+			Description:  "Read and inspect Cloud Run services across regional clusters",
+			Connected:    true,
+			KeylessADC:   true,
+			ScopeMode:    "read_only",
+			AccountLabel: "spark-mcp-sa@project.iam.gserviceaccount.com (Keyless ADC)",
+			UpdatedAt:    "2026-11-09T10:00:00Z",
+		},
+		{
+			ID:           "gflow",
+			Name:         "Google Flow (gflow MCP)",
+			Description:  "AI Image & Video Generation engine powered by Google Flow",
+			Connected:    true,
+			KeylessADC:   true,
+			ScopeMode:    "read_only",
+			AccountLabel: "spark-mcp-sa@project.iam.gserviceaccount.com (Built-In + ADC)",
+			UpdatedAt:    "2026-11-09T10:00:00Z",
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	data := ui.DashboardPageData{
+		AdminEmail:  "admin@example.com",
+		ServiceURL:  "https://gateway.example.com",
+		MCPEndpoint: "https://gateway.example.com/mcp",
+		CSRFToken:   "csrf-gcp-gflow",
+		Connectors:  connectors,
+	}
+
+	err := ui.RenderDashboard(rec, http.StatusOK, data)
+	if err != nil {
+		t.Fatalf("RenderDashboard failed: %v", err)
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	assertSecurityHeaders(t, rec)
+	body := rec.Body.String()
+
+	// 1. Verify GCP card capabilities row and Setup Guide button
+	if !strings.Contains(body, "Tools (9 Read-Only): Cloud Run, Revisions, Cloud Logging, Storage Buckets, Artifact Registry, Monitoring Alerts, IAM Accounts, Resource Inspector") {
+		t.Errorf("expected GCP MCP compact capabilities row in dashboard")
+	}
+	if !strings.Contains(body, `onclick="openTutorial('gcp')"`) {
+		t.Errorf("expected Setup Guide button with openTutorial('gcp') in dashboard")
+	}
+
+	// 2. Verify GFlow card badges, capabilities row, and action buttons
+	if !strings.Contains(body, "ACTIVE (BUILT-IN + ADC)") {
+		t.Errorf("expected ACTIVE (BUILT-IN + ADC) badge on gflow card")
+	}
+	if !strings.Contains(body, "IMAGE &amp; VIDEO AI (11 TOOLS)") && !strings.Contains(body, "IMAGE & VIDEO AI (11 TOOLS)") {
+		t.Errorf("expected IMAGE & VIDEO AI (11 TOOLS) badge on gflow card")
+	}
+	if !strings.Contains(body, "Models: Nano Banana 2.1 (nano2), Nano Pro, Imagen 4, Veo Fast / Quality (t2v, i2v, r2v), 2K/4K &amp; 1080p Upscale") &&
+		!strings.Contains(body, "Models: Nano Banana 2.1 (nano2), Nano Pro, Imagen 4, Veo Fast / Quality (t2v, i2v, r2v), 2K/4K & 1080p Upscale") {
+		t.Errorf("expected GFlow compact capabilities row in dashboard")
+	}
+	if !strings.Contains(body, `onclick="openTutorial('gflow')"`) {
+		t.Errorf("expected Setup Guide button with openTutorial('gflow') in dashboard")
+	}
+	if !strings.Contains(body, `onclick="prefillCustomConnector('gflow-remote', 'Google Flow (Remote MCP)', 'remote_mcp', 'https://flow.google.com/mcp', 'Authorization')"`) {
+		t.Errorf("expected Configure Remote GFlow Endpoint button in dashboard")
+	}
+
+	// 3. Verify Connector Catalog modal cards for GCP and GFlow
+	if !strings.Contains(body, "Google Flow (gflow MCP)") {
+		t.Errorf("expected Google Flow in catalog modal")
+	}
+	if !strings.Contains(body, "Google Cloud Platform (GCP Read-Only MCP)") {
+		t.Errorf("expected Google Cloud Platform in catalog modal")
+	}
+
+	// 4. Verify TUTORIAL_GUIDES for GCP
+	gcpTools := []string{
+		"gcp_list_cloudrun_services",
+		"gcp_get_cloudrun_service",
+		"gcp_list_cloudrun_revisions",
+		"gcp_query_cloud_logging",
+		"gcp_list_storage_buckets",
+		"gcp_list_artifact_repositories",
+		"gcp_list_monitoring_alerts",
+		"gcp_list_service_accounts",
+		"gcp_describe_resource",
+	}
+	for _, tool := range gcpTools {
+		if !strings.Contains(body, tool) {
+			t.Errorf("TUTORIAL_GUIDES missing expected GCP tool: %s", tool)
+		}
+	}
+	if !strings.Contains(body, "strict secret redaction") {
+		t.Errorf("TUTORIAL_GUIDES missing strict secret redaction mention for GCP")
+	}
+
+	// 5. Verify TUTORIAL_GUIDES for GFlow
+	gflowTools := []string{
+		"gflow_generate_image",
+		"gflow_generate_video",
+		"gflow_upscale_image",
+		"gflow_upscale_video",
+		"gflow_list_models",
+		"gflow_list_tools",
+		"gflow_list_projects",
+		"gflow_character_list",
+		"gflow_character_show",
+		"gflow_get_credits",
+		"gflow_auth_status",
+	}
+	for _, tool := range gflowTools {
+		if !strings.Contains(body, tool) {
+			t.Errorf("TUTORIAL_GUIDES missing expected GFlow tool: %s", tool)
+		}
+	}
+	if !strings.Contains(body, "https://flow.google.com/mcp") {
+		t.Errorf("TUTORIAL_GUIDES missing https://flow.google.com/mcp for remote GFlow")
 	}
 }

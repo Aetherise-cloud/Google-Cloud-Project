@@ -36,10 +36,16 @@ type Registry struct {
 	tools      map[string]*registeredTool
 	adcFunc    func(ctx context.Context) (string, error)
 
-	GitHubBaseURL   string
-	JiraBaseURL     string
-	CloudRunBaseURL string
-	GDKBaseURL      string
+	GitHubBaseURL           string
+	JiraBaseURL             string
+	CloudRunBaseURL         string
+	GDKBaseURL              string
+	LoggingBaseURL          string
+	StorageBaseURL          string
+	ArtifactRegistryBaseURL string
+	MonitoringBaseURL       string
+	IAMBaseURL              string
+	GFlowBaseURL            string
 }
 
 // NewRegistry creates and registers all 8 MCP tools.
@@ -52,17 +58,24 @@ func NewRegistry(cfg *config.Config, httpClient *http.Client, adcFunc func(ctx c
 	}
 
 	r := &Registry{
-		cfg:             cfg,
-		httpClient:      httpClient,
-		tools:           make(map[string]*registeredTool),
-		adcFunc:         adcFunc,
-		GitHubBaseURL:   "https://api.github.com",
-		JiraBaseURL:     "https://api.atlassian.com",
-		CloudRunBaseURL: "https://run.googleapis.com",
-		GDKBaseURL:      "https://developerknowledge.googleapis.com",
+		cfg:                     cfg,
+		httpClient:              httpClient,
+		tools:                   make(map[string]*registeredTool),
+		adcFunc:                 adcFunc,
+		GitHubBaseURL:           "https://api.github.com",
+		JiraBaseURL:             "https://api.atlassian.com",
+		CloudRunBaseURL:         "https://run.googleapis.com",
+		GDKBaseURL:              "https://developerknowledge.googleapis.com",
+		LoggingBaseURL:          "https://logging.googleapis.com",
+		StorageBaseURL:          "https://storage.googleapis.com",
+		ArtifactRegistryBaseURL: "https://artifactregistry.googleapis.com",
+		MonitoringBaseURL:       "https://monitoring.googleapis.com",
+		IAMBaseURL:              "https://iam.googleapis.com",
+		GFlowBaseURL:            "",
 	}
 
 	r.registerAllTools()
+	r.registerGFlowTools()
 	return r
 }
 
