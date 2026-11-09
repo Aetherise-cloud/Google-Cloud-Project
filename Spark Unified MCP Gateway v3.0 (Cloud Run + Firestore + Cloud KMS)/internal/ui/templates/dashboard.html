@@ -66,7 +66,10 @@
                 <span class="connector-name">{{.Name}}</span>
               </div>
               <div class="connector-badges">
-                {{if .KeylessADC}}
+                {{if eq .ID "gflow"}}
+                  <span class="badge badge-adc">ACTIVE (BUILT-IN + ADC)</span>
+                  <span class="badge badge-custom">IMAGE &amp; VIDEO AI (11 TOOLS)</span>
+                {{else if .KeylessADC}}
                   <span class="badge badge-adc">Active (Keyless ADC)</span>
                   <span class="badge badge-readonly">Read-Only</span>
                 {{else}}
@@ -88,6 +91,18 @@
             <p class="connector-desc">{{.Description}}</p>
 
             <div class="connector-meta">
+              {{if eq .ID "gcp"}}
+              <div class="connector-meta-row">
+                <span class="meta-label">Capabilities:</span>
+                <span class="meta-val">Tools (9 Read-Only): Cloud Run, Revisions, Cloud Logging, Storage Buckets, Artifact Registry, Monitoring Alerts, IAM Accounts, Resource Inspector</span>
+              </div>
+              {{end}}
+              {{if eq .ID "gflow"}}
+              <div class="connector-meta-row">
+                <span class="meta-label">Capabilities:</span>
+                <span class="meta-val">Models: Nano Banana 2.1 (nano2), Nano Pro, Imagen 4, Veo Fast / Quality (t2v, i2v, r2v), 2K/4K &amp; 1080p Upscale</span>
+              </div>
+              {{end}}
               {{if .AccountLabel}}
               <div class="connector-meta-row">
                 <span class="meta-label">Account:</span>
@@ -110,11 +125,56 @@
                 <span class="meta-label">Type:</span>
                 <span class="meta-val">{{if .KeylessADC}}Keyless Google ADC{{else if .IsCustom}}{{if eq .ConnectorType "rest_api"}}Custom REST API{{else}}Custom Remote MCP{{end}}{{else}}OAuth 2.0 Integration{{end}}</span>
               </div>
+              {{if .SiteName}}
+              <div class="connector-meta-row">
+                <span class="meta-label">Site:</span>
+                <span class="meta-val">{{.SiteName}}</span>
+              </div>
+              {{end}}
+              {{if .SelectedOrgs}}
+              <div class="connector-meta-row">
+                <span class="meta-label">Orgs:</span>
+                <span class="meta-val">{{range $i, $e := .SelectedOrgs}}{{if $i}}, {{end}}{{$e}}{{end}}</span>
+              </div>
+              {{end}}
+              {{if .AllowedReadRepos}}
+              <div class="connector-meta-row">
+                <span class="meta-label">Read Repos:</span>
+                <span class="meta-val">{{range $i, $e := .AllowedReadRepos}}{{if $i}}, {{end}}{{$e}}{{end}}</span>
+              </div>
+              {{end}}
+              {{if .AllowedWriteRepos}}
+              <div class="connector-meta-row">
+                <span class="meta-label">Write Repos:</span>
+                <span class="meta-val">{{range $i, $e := .AllowedWriteRepos}}{{if $i}}, {{end}}{{$e}}{{end}}</span>
+              </div>
+              {{end}}
+              {{if .AllowedSpaceKeys}}
+              <div class="connector-meta-row">
+                <span class="meta-label">Jira Spaces:</span>
+                <span class="meta-val">{{range $i, $e := .AllowedSpaceKeys}}{{if $i}}, {{end}}{{$e}}{{end}}</span>
+              </div>
+              {{end}}
             </div>
           </div>
 
           <div class="connector-actions">
-            {{if .KeylessADC}}
+            {{if eq .ID "gflow"}}
+              <div class="text-muted" style="font-size: 0.82rem; font-style: italic; margin-bottom: 8px;">
+                Built-in Google Flow generation engine with ADC authentication. No manual credentials required.
+              </div>
+              <div class="btn-row">
+                <button type="button" class="btn btn-sm btn-outline" onclick="openTutorial('gflow')">Setup Guide</button>
+                <button type="button" class="btn btn-sm btn-primary" onclick="prefillCustomConnector('gflow-remote', 'Google Flow (Remote MCP)', 'remote_mcp', 'https://flow.google.com/mcp', 'Authorization')">Configure Remote GFlow Endpoint</button>
+              </div>
+            {{else if eq .ID "gcp"}}
+              <div class="text-muted" style="font-size: 0.82rem; font-style: italic; margin-bottom: 8px;">
+                Always active via Google Cloud Application Default Credentials. No manual authorization required.
+              </div>
+              <div class="btn-row">
+                <button type="button" class="btn btn-sm btn-outline" onclick="openTutorial('gcp')">Setup Guide</button>
+              </div>
+            {{else if .KeylessADC}}
               <div class="text-muted" style="font-size: 0.82rem; font-style: italic;">
                 Always active via Google Cloud Application Default Credentials. No manual authorization required.
               </div>
@@ -154,6 +214,12 @@
                   Tutorial &amp; Configure
                 </button>
 
+                {{if or (eq .ID "github") (eq .ID "jira")}}
+                <button type="button" class="btn btn-sm btn-outline" onclick="openWorkspaceModal('{{.ID}}')">
+                  Workspace Picker
+                </button>
+                {{end}}
+
                 {{if .Connected}}
                 <form method="POST" action="/api/connections/{{.ID}}/disconnect" style="margin: 0; display: inline;">
                   <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
@@ -188,6 +254,29 @@
           <button type="button" class="category-pill" onclick="setCatalogCategory('custom', this)">Custom</button>
         </div>
         <div class="catalog-grid" id="catalog-grid">
+          <!-- Google Cloud Platform (GCP Read-Only MCP) -->
+          <div class="catalog-card" data-category="dev mcp" data-name="google cloud platform gcp read-only mcp" onclick="openTutorial('gcp')">
+            <div class="catalog-icon">GCP</div>
+            <div class="catalog-info">
+              <div class="catalog-name">Google Cloud Platform (GCP Read-Only MCP) <span class="badge badge-adc">Keyless ADC</span></div>
+              <div class="catalog-desc">Cloud Run, Revisions, Logging, Storage, Artifacts, IAM &amp; Monitoring &mdash; 9 Read-Only tools via Keyless ADC.</div>
+              <div class="catalog-action">
+                <button type="button" class="btn btn-sm btn-outline" onclick="event.stopPropagation(); openTutorial('gcp'); closeModal('catalog-modal');">Setup Guide &rarr;</button>
+              </div>
+            </div>
+          </div>
+          <!-- Google Flow (gflow MCP) -->
+          <div class="catalog-card" data-category="mcp prod dev" data-name="google flow gflow mcp ai image video generation" onclick="openTutorial('gflow')">
+            <div class="catalog-icon">GF</div>
+            <div class="catalog-info">
+              <div class="catalog-name">Google Flow (gflow MCP) <span class="badge badge-adc">Built-In + Remote</span></div>
+              <div class="catalog-desc">AI Image &amp; Video Generation &mdash; Nano Banana, Imagen 4 &amp; Veo via built-in ADC or remote MCP.</div>
+              <div class="catalog-action" style="display: flex; gap: 6px; flex-wrap: wrap;">
+                <button type="button" class="btn btn-sm btn-outline" onclick="event.stopPropagation(); openTutorial('gflow'); closeModal('catalog-modal');">Setup Guide</button>
+                <button type="button" class="btn btn-sm btn-primary" onclick="event.stopPropagation(); prefillCustomConnector('gflow-remote', 'Google Flow (Remote MCP)', 'remote_mcp', 'https://flow.google.com/mcp', 'Authorization');">Configure Remote Endpoint</button>
+              </div>
+            </div>
+          </div>
           <!-- 1. GitHub -->
           <div class="catalog-card" data-category="dev" data-name="github" onclick="selectConnectorTemplate('github')">
             <div class="catalog-icon">GH</div>
@@ -229,7 +318,7 @@
             <div class="catalog-icon">SL</div>
             <div class="catalog-info">
               <div class="catalog-name">Slack <span class="badge badge-adc">REST / MCP</span></div>
-              <div class="catalog-desc">Workspace channels, message search, and posting via Slack Bot Token.</div>
+              <div class="catalog-desc">Workspace channels, member search, and thread message posting via Slack Bot Token.</div>
               <div class="catalog-action">Select &amp; View Tutorial &rarr;</div>
             </div>
           </div>
@@ -265,7 +354,7 @@
             <div class="catalog-icon">MCP</div>
             <div class="catalog-info">
               <div class="catalog-name">Custom Remote MCP Server <span class="badge badge-custom">Custom</span></div>
-              <div class="catalog-desc">Streamable HTTP JSON-RPC /mcp upstream endpoint + optional Bearer Token.</div>
+              <div class="catalog-desc">Streamable HTTP JSON-RPC /mcp upstream microservice + optional Bearer Token.</div>
               <div class="catalog-action">Select &amp; View Tutorial &rarr;</div>
             </div>
           </div>
@@ -274,7 +363,7 @@
             <div class="catalog-icon">API</div>
             <div class="catalog-info">
               <div class="catalog-name">Custom REST API Connector <span class="badge badge-custom">Custom</span></div>
-              <div class="catalog-desc">Any enterprise HTTPS REST API endpoint + custom Authorization Header.</div>
+              <div class="catalog-desc">Any enterprise HTTPS REST API microservice + custom Authorization Header.</div>
               <div class="catalog-action">Select &amp; View Tutorial &rarr;</div>
             </div>
           </div>
@@ -514,6 +603,15 @@
             </div>
           </form>
         </div>
+
+        <!-- Tutorial Guide Pane (GCP & GFlow) -->
+        <div id="setup-pane-tutorial-guide" style="display: none;">
+          <div id="tutorial-guide-badge" style="margin-bottom: 12px;"></div>
+          <div class="tutorial-steps" id="tutorial-guide-steps"></div>
+          <div class="modal-footer" style="padding-left: 0; padding-right: 0;">
+            <button type="button" class="btn btn-primary" onclick="closeModal('setup-modal')">Done</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -591,6 +689,85 @@
     </div>
   </div>
 
+  <!-- Modal 4: Interactive Workspace & Scope Picker Modal -->
+  <div class="modal-backdrop" id="workspace-modal" onclick="onBackdropClick(event, 'workspace-modal')">
+    <div class="modal-dialog modal-dialog-lg">
+      <div class="modal-header">
+        <h3 class="modal-title" id="workspace-modal-title">Workspace &amp; Resource Scope Picker</h3>
+        <button type="button" class="modal-close" onclick="closeModal('workspace-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="workspace-alert" style="display: none;" class="alert">
+          <span id="workspace-alert-text"></span>
+        </div>
+        <div id="workspace-loading" style="display: none; padding: 20px; text-align: center; color: var(--text-muted);">
+          Discovering accessible workspaces and resources...
+        </div>
+
+        <!-- GitHub Workspace Picker Pane -->
+        <div id="workspace-content-github" style="display: none;">
+          <p class="text-muted" style="margin-bottom: 16px;">
+            Configure repository access boundaries for the GitHub connector. Select organizations and allowed read/write repositories.
+          </p>
+
+          <div class="workspace-group">
+            <div class="workspace-group-title">Target GitHub Organizations:</div>
+            <div class="checkbox-list" id="ws-gh-orgs-list"></div>
+            <div style="margin-top: 6px;">
+              <label for="ws-gh-manual-orgs" style="font-size: 0.8rem; color: var(--text-muted);">Manual Organizations (comma-separated):</label>
+              <input type="text" id="ws-gh-manual-orgs" class="form-input" placeholder="e.g. aetherise-cloud">
+            </div>
+          </div>
+
+          <div class="workspace-group" style="margin-top: 14px;">
+            <div class="workspace-group-title">Allowed Read Repositories:</div>
+            <div class="checkbox-list" id="ws-gh-read-repos-list"></div>
+            <div style="margin-top: 6px;">
+              <label for="ws-gh-manual-read-repos" style="font-size: 0.8rem; color: var(--text-muted);">Manual Read Repos (comma-separated, e.g. org/repo or org/*):</label>
+              <input type="text" id="ws-gh-manual-read-repos" class="form-input" placeholder="e.g. aetherise-cloud/*">
+            </div>
+          </div>
+
+          <div class="workspace-group" style="margin-top: 14px;">
+            <div class="workspace-group-title">Allowed Write Repositories:</div>
+            <div class="checkbox-list" id="ws-gh-write-repos-list"></div>
+            <div style="margin-top: 6px;">
+              <label for="ws-gh-manual-write-repos" style="font-size: 0.8rem; color: var(--text-muted);">Manual Write Repos (comma-separated):</label>
+              <input type="text" id="ws-gh-manual-write-repos" class="form-input" placeholder="e.g. aetherise-cloud/spark-mcp-gateway">
+            </div>
+          </div>
+        </div>
+
+        <!-- Jira Workspace Picker Pane -->
+        <div id="workspace-content-jira" style="display: none;">
+          <p class="text-muted" style="margin-bottom: 16px;">
+            Configure project and space access boundaries for the Atlassian Jira connector.
+          </p>
+
+          <div id="ws-jira-site-info" class="card" style="padding: 12px; margin-bottom: 16px; background-color: #0b111e; border: 1px solid var(--border-color); display: none;">
+            <div style="font-size: 0.85rem; color: var(--text-secondary);">
+              Bound Atlassian Site: <strong id="ws-jira-site-name" style="color: var(--primary-light);"></strong>
+              <span id="ws-jira-cloud-id" class="text-muted" style="margin-left: 8px;"></span>
+            </div>
+          </div>
+
+          <div class="workspace-group">
+            <div class="workspace-group-title">Target Jira Spaces / Project Keys:</div>
+            <div class="checkbox-list" id="ws-jira-spaces-list"></div>
+            <div style="margin-top: 6px;">
+              <label for="ws-jira-manual-spaces" style="font-size: 0.8rem; color: var(--text-muted);">Manual Project Space Keys (comma-separated):</label>
+              <input type="text" id="ws-jira-manual-spaces" class="form-input" placeholder="e.g. SPARK, ONB">
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline" onclick="closeModal('workspace-modal')">Cancel</button>
+        <button type="button" class="btn btn-primary" id="btn-save-workspace" onclick="saveWorkspaceScopes()">Save Workspace Settings</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     var CSRF_TOKEN = document.getElementById('dashboard-csrf-token').value;
     var SERVICE_URL = document.getElementById('service-url-val').getAttribute('data-url') || '';
@@ -662,6 +839,7 @@
         closeModal('catalog-modal');
         closeModal('setup-modal');
         closeModal('client-guide-modal');
+        closeModal('workspace-modal');
       }
     });
 
@@ -689,7 +867,7 @@
         var name = cards[i].getAttribute('data-name') || '';
         var text = cards[i].innerText.toLowerCase();
         if (!q || name.indexOf(q) !== -1 || text.indexOf(q) !== -1) {
-          cards[i].style.display = 'flex';
+          cards[j].style.display = 'flex';
         } else {
           cards[i].style.display = 'none';
         }
@@ -776,8 +954,138 @@
         authHeader: 'Authorization',
         portalUrl: '',
         portalName: ''
+      },
+      'gflow-remote': {
+        name: 'Google Flow (Remote MCP)',
+        slug: 'gflow-remote',
+        desc: 'Google Flow Remote MCP server at https://flow.google.com/mcp',
+        type: 'remote_mcp',
+        endpoint: 'https://flow.google.com/mcp',
+        authHeader: 'Authorization',
+        portalUrl: '',
+        portalName: ''
       }
     };
+
+    var TUTORIAL_GUIDES = {
+      gcp: {
+        title: 'Google Cloud Platform (GCP Read-Only MCP) Setup Guide',
+        badge: 'Keyless ADC (9 Read-Only Tools)',
+        steps: [
+          {
+            title: 'Keyless ADC Automatic Authentication',
+            text: 'Keyless ADC automatically authenticates Cloud Run, Cloud Logging, Cloud Storage, Artifact Registry, Cloud Monitoring, and IAM read-only tools without requiring API keys or manual secret rotation.'
+          },
+          {
+            title: '9 Read-Only Diagnostic & Management Tools',
+            text: 'Exposes 9 read-only inspection tools: gcp_list_cloudrun_services, gcp_get_cloudrun_service, gcp_list_cloudrun_revisions, gcp_query_cloud_logging, gcp_list_storage_buckets, gcp_list_artifact_repositories, gcp_list_monitoring_alerts, gcp_list_service_accounts, and gcp_describe_resource.'
+          },
+          {
+            title: 'Strict Secret Redaction & Read-Only Enforcement',
+            text: 'All responses strictly redact sensitive environment variables, service account private keys, and token material before returning to the model with strict secret redaction.'
+          }
+        ]
+      },
+      gflow: {
+        title: 'Google Flow (gflow MCP) Setup Guide',
+        badge: 'Built-In + ADC (11 Tools)',
+        steps: [
+          {
+            title: 'Out-of-the-Box Built-In Engine',
+            text: 'Google Flow (gflow MCP) works out-of-the-box with all 11 tools powered by Google Cloud ADC: gflow_generate_image, gflow_generate_video, gflow_upscale_image, gflow_upscale_video, gflow_list_models, gflow_list_tools, gflow_list_projects, gflow_character_list, gflow_character_show, gflow_get_credits, and gflow_auth_status.'
+          },
+          {
+            title: 'Supported Generation & Upscaling Models',
+            text: 'Models: Nano Banana 2.1 (nano2), Nano Pro, Imagen 4, Veo Fast / Quality (t2v, i2v, r2v), 2K/4K & 1080p Upscale.'
+          },
+          {
+            title: 'Remote MCP Integration (Optional)',
+            text: 'You can optionally connect a custom Remote gflow MCP server by pointing to https://flow.google.com/mcp with an Authorization Bearer token.'
+          }
+        ]
+      }
+    };
+
+    function openTutorial(topic) {
+      var guide = TUTORIAL_GUIDES[topic];
+      if (!guide) {
+        openSetupModal(topic);
+        return;
+      }
+
+      var modal = document.getElementById('setup-modal');
+      var alertBox = document.getElementById('setup-alert');
+      if (alertBox) alertBox.style.display = 'none';
+
+      document.getElementById('setup-pane-github').style.display = 'none';
+      document.getElementById('setup-pane-jira').style.display = 'none';
+      document.getElementById('setup-pane-custom').style.display = 'none';
+
+      var tutorialPane = document.getElementById('setup-pane-tutorial-guide');
+      if (tutorialPane) tutorialPane.style.display = 'block';
+
+      var title = document.getElementById('setup-modal-title');
+      if (title) title.innerText = guide.title;
+
+      var badgeContainer = document.getElementById('tutorial-guide-badge');
+      if (badgeContainer) {
+        badgeContainer.innerHTML = '';
+        var badge = document.createElement('span');
+        badge.className = 'badge badge-adc';
+        badge.textContent = guide.badge;
+        badgeContainer.appendChild(badge);
+      }
+
+      var stepsContainer = document.getElementById('tutorial-guide-steps');
+      if (stepsContainer) {
+        stepsContainer.innerHTML = '';
+        for (var i = 0; i < guide.steps.length; i++) {
+          var step = guide.steps[i];
+          var stepDiv = document.createElement('div');
+          stepDiv.className = 'tutorial-step';
+
+          var stepNum = document.createElement('div');
+          stepNum.className = 'step-num';
+          stepNum.textContent = '' + (i + 1);
+
+          var stepBody = document.createElement('div');
+          stepBody.className = 'step-body';
+
+          var stepTitle = document.createElement('div');
+          stepTitle.className = 'step-title';
+          stepTitle.textContent = step.title;
+
+          var stepText = document.createElement('div');
+          stepText.className = 'step-text';
+          stepText.textContent = step.text;
+
+          stepBody.appendChild(stepTitle);
+          stepBody.appendChild(stepText);
+
+          stepDiv.appendChild(stepNum);
+          stepDiv.appendChild(stepBody);
+
+          stepsContainer.appendChild(stepDiv);
+        }
+      }
+
+      if (modal) modal.classList.add('active');
+    }
+
+    function prefillCustomConnector(slug, name, type, endpoint, authHeader) {
+      closeModal('catalog-modal');
+      openSetupModal('custom_mcp', slug);
+      var nameInput = document.getElementById('custom-name');
+      var slugInput = document.getElementById('custom-slug');
+      var typeSelect = document.getElementById('custom-type');
+      var endpointInput = document.getElementById('custom-endpoint');
+      var authHeaderInput = document.getElementById('custom-auth-header');
+      if (nameInput) nameInput.value = name;
+      if (slugInput) slugInput.value = slug;
+      if (typeSelect) typeSelect.value = type;
+      if (endpointInput) endpointInput.value = endpoint;
+      if (authHeaderInput) authHeaderInput.value = authHeader;
+    }
 
     function selectConnectorTemplate(templateId) {
       closeModal('catalog-modal');
@@ -792,6 +1100,8 @@
       document.getElementById('setup-pane-github').style.display = 'none';
       document.getElementById('setup-pane-jira').style.display = 'none';
       document.getElementById('setup-pane-custom').style.display = 'none';
+      var tutorialPane = document.getElementById('setup-pane-tutorial-guide');
+      if (tutorialPane) tutorialPane.style.display = 'none';
 
       var title = document.getElementById('setup-modal-title');
 
@@ -1026,6 +1336,282 @@
       })
       .catch(function(err) {
         alert(err.message);
+      })
+      .finally(function() {
+        if (btn) btn.disabled = false;
+      });
+    }
+
+    var currentWorkspaceApp = '';
+
+    function showWorkspaceAlert(msg, isError) {
+      var box = document.getElementById('workspace-alert');
+      var text = document.getElementById('workspace-alert-text');
+      if (box && text) {
+        text.innerText = msg;
+        box.className = 'alert ' + (isError ? 'alert-error' : 'alert-success');
+        box.style.display = 'flex';
+      }
+    }
+
+    function openWorkspaceModal(app) {
+      currentWorkspaceApp = app;
+      var modal = document.getElementById('workspace-modal');
+      var alertBox = document.getElementById('workspace-alert');
+      var loading = document.getElementById('workspace-loading');
+      var ghPane = document.getElementById('workspace-content-github');
+      var jiraPane = document.getElementById('workspace-content-jira');
+      var title = document.getElementById('workspace-modal-title');
+
+      if (alertBox) alertBox.style.display = 'none';
+      if (ghPane) ghPane.style.display = 'none';
+      if (jiraPane) jiraPane.style.display = 'none';
+      if (loading) loading.style.display = 'block';
+
+      if (app === 'github') {
+        if (title) title.innerText = 'GitHub Workspace & Scope Picker';
+      } else if (app === 'jira') {
+        if (title) title.innerText = 'Atlassian Jira Space & Scope Picker';
+      }
+
+      if (modal) modal.classList.add('active');
+
+      fetch('/api/connectors/' + encodeURIComponent(app) + '/workspaces', {
+        method: 'GET',
+        credentials: 'same-origin'
+      })
+      .then(function(res) {
+        return res.json().then(function(data) {
+          if (!res.ok) throw new Error(data.error_description || data.error || 'Failed to fetch workspaces');
+          return data;
+        });
+      })
+      .then(function(data) {
+        if (loading) loading.style.display = 'none';
+        if (app === 'github') {
+          if (ghPane) ghPane.style.display = 'block';
+          populateGitHubWorkspaceModal(data);
+        } else if (app === 'jira') {
+          if (jiraPane) jiraPane.style.display = 'block';
+          populateJiraWorkspaceModal(data);
+        }
+      })
+      .catch(function(err) {
+        if (loading) loading.style.display = 'none';
+        showWorkspaceAlert(err.message, true);
+        if (app === 'github' && ghPane) ghPane.style.display = 'block';
+        if (app === 'jira' && jiraPane) jiraPane.style.display = 'block';
+      });
+    }
+
+    function populateGitHubWorkspaceModal(data) {
+      var orgsList = document.getElementById('ws-gh-orgs-list');
+      var readList = document.getElementById('ws-gh-read-repos-list');
+      var writeList = document.getElementById('ws-gh-write-repos-list');
+
+      if (orgsList) while (orgsList.firstChild) orgsList.removeChild(orgsList.firstChild);
+      if (readList) while (readList.firstChild) readList.removeChild(readList.firstChild);
+      if (writeList) while (writeList.firstChild) writeList.removeChild(writeList.firstChild);
+
+      var orgs = data.organizations || data.orgs || [];
+      var selectedOrgs = data.selected_orgs || [];
+      var repos = data.repositories || data.repos || [];
+      var allowedReadRepos = data.allowed_read_repos || [];
+      var allowedWriteRepos = data.allowed_write_repos || [];
+
+      if (orgsList) {
+        for (var i = 0; i < orgs.length; i++) {
+          var oName = typeof orgs[i] === 'string' ? orgs[i] : (orgs[i].login || orgs[i].name);
+          var lbl = document.createElement('label');
+          lbl.className = 'checkbox-item';
+          var cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.value = oName;
+          cb.name = 'ws_selected_orgs';
+          if (selectedOrgs.indexOf(oName) !== -1 || selectedOrgs.length === 0) cb.checked = true;
+          var sp = document.createElement('span');
+          sp.textContent = oName;
+          lbl.appendChild(cb);
+          lbl.appendChild(sp);
+          orgsList.appendChild(lbl);
+        }
+      }
+
+      if (readList) {
+        for (var o = 0; o < orgs.length; o++) {
+          var orgWildcard = (typeof orgs[o] === 'string' ? orgs[o] : (orgs[o].login || orgs[o].name)) + '/*';
+          var wildLbl = document.createElement('label');
+          wildLbl.className = 'checkbox-item';
+          var wildCb = document.createElement('input');
+          wildCb.type = 'checkbox';
+          wildCb.value = orgWildcard;
+          wildCb.name = 'ws_allowed_read_repos';
+          if (allowedReadRepos.indexOf(orgWildcard) !== -1) wildCb.checked = true;
+          var wildSp = document.createElement('span');
+          wildSp.textContent = orgWildcard + ' (All Repos)';
+          wildLbl.appendChild(wildCb);
+          wildLbl.appendChild(wildSp);
+          readList.appendChild(wildLbl);
+        }
+
+        for (var r = 0; r < repos.length; r++) {
+          var rName = typeof repos[r] === 'string' ? repos[r] : (repos[r].full_name || repos[r].name);
+          var rLbl = document.createElement('label');
+          rLbl.className = 'checkbox-item';
+          var rCb = document.createElement('input');
+          rCb.type = 'checkbox';
+          rCb.value = rName;
+          rCb.name = 'ws_allowed_read_repos';
+          if (allowedReadRepos.indexOf(rName) !== -1) rCb.checked = true;
+          var rSp = document.createElement('span');
+          rSp.textContent = rName;
+          rLbl.appendChild(rCb);
+          rLbl.appendChild(rSp);
+          readList.appendChild(rLbl);
+        }
+      }
+
+      if (writeList) {
+        for (var w = 0; w < repos.length; w++) {
+          var wrName = typeof repos[w] === 'string' ? repos[w] : (repos[w].full_name || repos[w].name);
+          var wrLbl = document.createElement('label');
+          wrLbl.className = 'checkbox-item';
+          var wrCb = document.createElement('input');
+          wrCb.type = 'checkbox';
+          wrCb.value = wrName;
+          wrCb.name = 'ws_allowed_write_repos';
+          if (allowedWriteRepos.indexOf(wrName) !== -1) wrCb.checked = true;
+          var wrSp = document.createElement('span');
+          wrSp.textContent = wrName;
+          wrLbl.appendChild(wrCb);
+          wrLbl.appendChild(wrSp);
+          writeList.appendChild(wrLbl);
+        }
+      }
+    }
+
+    function populateJiraWorkspaceModal(data) {
+      var siteInfo = document.getElementById('ws-jira-site-info');
+      var siteNameEl = document.getElementById('ws-jira-site-name');
+      var cloudIdEl = document.getElementById('ws-jira-cloud-id');
+      var spacesList = document.getElementById('ws-jira-spaces-list');
+
+      if (siteInfo && (data.site_name || data.site_url || data.cloud_id)) {
+        if (siteNameEl) siteNameEl.textContent = data.site_name || data.site_url || 'Connected Atlassian Site';
+        if (cloudIdEl) cloudIdEl.textContent = data.cloud_id ? '(' + data.cloud_id + ')' : '';
+        siteInfo.style.display = 'block';
+      }
+
+      if (spacesList) {
+        while (spacesList.firstChild) spacesList.removeChild(spacesList.firstChild);
+
+        var spaces = data.spaces || data.projects || data.space_keys || [];
+        var allowedSpaces = data.allowed_space_keys || [];
+
+        for (var i = 0; i < spaces.length; i++) {
+          var sKey = typeof spaces[i] === 'string' ? spaces[i] : (spaces[i].key || spaces[i].id);
+          var sDesc = typeof spaces[i] === 'string' ? spaces[i] : (spaces[i].name ? spaces[i].key + ' - ' + spaces[i].name : spaces[i].key);
+          var lbl = document.createElement('label');
+          lbl.className = 'checkbox-item';
+          var cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.value = sKey;
+          cb.name = 'ws_allowed_space_keys';
+          if (allowedSpaces.indexOf(sKey) !== -1 || allowedSpaces.length === 0) cb.checked = true;
+          var sp = document.createElement('span');
+          sp.textContent = sDesc;
+          lbl.appendChild(cb);
+          lbl.appendChild(sp);
+          spacesList.appendChild(lbl);
+        }
+      }
+    }
+
+    function saveWorkspaceScopes() {
+      var btn = document.getElementById('btn-save-workspace');
+      if (btn) btn.disabled = true;
+
+      var payload = {
+        csrf_token: CSRF_TOKEN,
+        provider: currentWorkspaceApp
+      };
+
+      if (currentWorkspaceApp === 'github') {
+        var orgs = [];
+        var orgCbs = document.querySelectorAll('input[name="ws_selected_orgs"]:checked');
+        for (var i = 0; i < orgCbs.length; i++) orgs.push(orgCbs[i].value);
+        var manualOrgs = document.getElementById('ws-gh-manual-orgs').value.trim();
+        if (manualOrgs) {
+          var splitOrgs = manualOrgs.split(',');
+          for (var mo = 0; mo < splitOrgs.length; mo++) {
+            var item = splitOrgs[mo].trim();
+            if (item && orgs.indexOf(item) === -1) orgs.push(item);
+          }
+        }
+
+        var readRepos = [];
+        var readCbs = document.querySelectorAll('input[name="ws_allowed_read_repos"]:checked');
+        for (var j = 0; j < readCbs.length; j++) readRepos.push(readCbs[j].value);
+        var manualRead = document.getElementById('ws-gh-manual-read-repos').value.trim();
+        if (manualRead) {
+          var splitRead = manualRead.split(',');
+          for (var mr = 0; mr < splitRead.length; mr++) {
+            var rItem = splitRead[mr].trim();
+            if (rItem && readRepos.indexOf(rItem) === -1) readRepos.push(rItem);
+          }
+        }
+
+        var writeRepos = [];
+        var writeCbs = document.querySelectorAll('input[name="ws_allowed_write_repos"]:checked');
+        for (var k = 0; k < writeCbs.length; k++) writeRepos.push(writeCbs[k].value);
+        var manualWrite = document.getElementById('ws-gh-manual-write-repos').value.trim();
+        if (manualWrite) {
+          var splitWrite = manualWrite.split(',');
+          for (var mw = 0; mw < splitWrite.length; mw++) {
+            var wItem = splitWrite[mw].trim();
+            if (wItem && writeRepos.indexOf(wItem) === -1) writeRepos.push(wItem);
+          }
+        }
+
+        payload.selected_orgs = orgs;
+        payload.allowed_read_repos = readRepos;
+        payload.allowed_write_repos = writeRepos;
+      } else if (currentWorkspaceApp === 'jira') {
+        var spaces = [];
+        var spaceCbs = document.querySelectorAll('input[name="ws_allowed_space_keys"]:checked');
+        for (var s = 0; s < spaceCbs.length; s++) spaces.push(spaceCbs[s].value);
+        var manualSpaces = document.getElementById('ws-jira-manual-spaces').value.trim();
+        if (manualSpaces) {
+          var splitSpaces = manualSpaces.split(',');
+          for (var ms = 0; ms < splitSpaces.length; ms++) {
+            var sItem = splitSpaces[ms].trim();
+            if (sItem && spaces.indexOf(sItem) === -1) spaces.push(sItem);
+          }
+        }
+        payload.allowed_space_keys = spaces;
+      }
+
+      fetch('/api/connectors/workspaces', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify(payload)
+      })
+      .then(function(res) {
+        return res.json().then(function(data) {
+          if (!res.ok) throw new Error(data.error_description || data.error || 'Failed to save workspace scopes');
+          return data;
+        });
+      })
+      .then(function() {
+        showWorkspaceAlert('Workspace permissions updated successfully.', false);
+        setTimeout(function() {
+          closeModal('workspace-modal');
+          window.location.reload();
+        }, 1000);
+      })
+      .catch(function(err) {
+        showWorkspaceAlert(err.message, true);
       })
       .finally(function() {
         if (btn) btn.disabled = false;
